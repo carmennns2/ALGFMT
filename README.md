@@ -1,0 +1,1 @@
+R script used for statistical analyses and generation of visual figures presented in the paper “Novel alginate formulation for fecal microbiota transplantation: comparative and long-term stability evaluation.”
