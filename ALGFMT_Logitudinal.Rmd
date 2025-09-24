@@ -1,0 +1,2134 @@
+---
+title: "ALGFMT_M24_Longitudinal_FINAL"
+author: "Carmen"
+date: '2024-10-08'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set( # when makes rmd file, two files are created (rmd and html) - when finish with analysis, to show code, knit to html, word, or pdf. gives you file with code and figures (like a journal) - this prevents messages and warnings to show up in final document, only errors will appear
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+#1. Load
+##1.1. Packages
+```{r libaries, message=FALSE, warning=FALSE, include=FALSE}
+# set working directory
+setwd("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/")
+
+# can add libraries that we need to use
+# install.packages("https://cran.r-project.org/src/contrib/Archive/car/car_3.0-11.tar.gz", repos = NULL, type="source")
+library(knitr)
+library(ggplot2)
+library(data.table)
+library(dplyr)
+library(RColorBrewer)
+library(plyr)
+library(stringr)
+library(kableExtra)
+library(phyloseq)
+library(tidyr)
+library(DT)
+library(ggpubr)
+library(microbiomeutilities) # interferes with fantaxtic
+library(phylosmith)
+library(ggrepel)
+library(ggh4x)
+library(gridExtra)
+# library(MicrobiotaProcess)   #this package conflicts with phyloseq and metasMisc, so unload it after using it
+library(performance)
+library(grid)
+library(metagMisc)
+library(grDevices)
+library(Maaslin2)
+library(microbiome)
+library(fantaxtic)
+library(ANCOMBC)
+library(DESeq2)
+library(VennDiagram)
+library(fuzzyjoin)
+library(BiodiversityR)
+library(dendextend)
+library(pvclust)
+library("graphics")
+library(pairwiseAdonis)
+library(ComplexHeatmap)
+library(cowplot)
+library(LinDA)
+library(NbClust)
+library(DirichletMultinomial)
+library(reshape2)
+library(magrittr)
+library(dplyr)
+library(readr)
+library(ggpicrust2)
+library(tibble)
+library(tidyverse)
+library(ggprism)
+library(patchwork)
+library(webr)
+library(gridExtra)
+library(NBZIMM)
+library(lme4)
+library(lmerTest)
+library(ggpattern)
+library(ComplexUpset)
+library(zoo)
+```
+
+##1.2. Data
+```{r}
+# load non-rarefied data
+physeq_no_raref <- readRDS("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/DADA2/4_physeq/RDP_ezbiocloud/Bacteria_in_Kingdom/norarefaction/no_collapse/base_with_tree.rds") #   2254 asvs
+
+physeq_no_raref <- phylosmith::set_sample_order(phyloseq_obj = physeq_no_raref, sort_on = "Individual")
+
+# remove unwanted samples
+physeq_no_raref <- subset_samples(physeq_no_raref, !(Individual == "Donor_09" |
+  sample_label %in% c( # "D1008ALG05", "D1102ALG05",
+    "D1105ALG05", "D1109ALG05", "D0503ALG04"
+  ))) # D0503ALG04 is a super outlier
+
+
+# check metadata to make sure everything is correct
+metadata <- data.frame(sample_data(physeq_no_raref))
+
+#########################################################################################################################################################
+# rarefry
+
+physeq <- rarefy_even_depth(physeq_no_raref, rngseed = 12345) # 2033 asvs
+
+# remove rare taxa (by converting singletons and doubletons to 0)
+otu_table(physeq)[otu_table(physeq) <= 2] <- 0
+
+# remove the alpha diversity index the came with the pipeline
+sample_data(physeq) <- sample_data(physeq)[, 1:(ncol(sample_data(physeq)) - 11)] # removes the last 11 columsn, which include the alpha diverseity measures computer by zAMP and R1 and R2 paths, which  I will not use as it is rareified. I will take the non-rarefied data then rarefy it myself.
+
+# create dataframes for easier analysis
+metadata <- data.frame(sample_data(physeq))
+count_table <- data.frame(otu_table(physeq))
+tax_table <- data.frame(phyloseq::tax_table(physeq))
+
+# count frequency for demographic information
+table(metadata$Timepoint)
+table(metadata$Individual, metadata$Timepoint)
+length(unique(metadata$sample_label))
+
+# get the average rarefied depth
+print(mean(colSums(as.data.frame(count_table)))) # 75779.55
+
+# make color palette
+mycolors <- c(brewer.pal(name = "Pastel1", n = 9), brewer.pal(name = "Set3", n = 12), brewer.pal(name = "Spectral", n = 11))
+
+#########################################################################################################################################################
+# calculate alpha diversity index:
+
+# Calculate the alpha diversity index
+set.seed(12345)
+alpha_indexes <- as.data.frame(MicrobiotaProcess::get_alphaindex(physeq)) %>%
+  mutate(Timepoint = factor(Timepoint, levels = c("T00", "T01", "T02", "T03", "T04"))) %>%
+  mutate(
+    Month_produced = gsub("/", "-", Month_produced),
+    Month_sequenced = gsub("/", "-", Month_sequenced)
+  ) %>%
+  mutate(
+    Month_produced = as.yearmon(Month_produced, "%m-%Y"),
+    Month_sequenced = as.yearmon(Month_sequenced, "%m-%Y")
+  )
+
+#########################################################################################################################################################
+# aggregate physeq to different taxonomic ranks:
+
+physeq_Species <- microbiome::aggregate_taxa(physeq, "Species") # 863 species
+physeq_Genus <- microbiome::aggregate_taxa(physeq, "Genus") # 313 genera
+physeq_Family <- microbiome::aggregate_taxa(physeq, "Family") # 65 families
+
+#########################################################################################################################################################
+# filter rare taxa for differential abundance analysis
+
+# only keeping taxas that are present in at least 50% of taxas and in 50% reads, to remove rare taxas
+da_physeq <- metagMisc::phyloseq_filter_prevalence(physeq = physeq, prev.trh = 0.50, abund.trh = .50, threshold_condition = "AND") # 215 asvs
+
+# aggregate to different taxonomic ranks
+da_physeq_Species <- microbiome::aggregate_taxa(da_physeq, "Species") # 191 species
+da_physeq_Species_dummy <- microbiome::aggregate_taxa(da_physeq, "Species") # make a dummy for Maaslin
+otu_table(da_physeq_Species_dummy)[otu_table(da_physeq_Species_dummy) == 0] <- 1 ## convert 0 to 1.00001 for dummy variable for differential abundance analysis
+
+da_physeq_Genus <- microbiome::aggregate_taxa(da_physeq, "Genus") # 99 genera
+da_physeq_Genus_dummy <- microbiome::aggregate_taxa(da_physeq, "Genus") # make a dummy for Maaslin
+otu_table(da_physeq_Genus_dummy)[otu_table(da_physeq_Genus_dummy) == 0] <- 1 ## convert 0 to 1.00001 for dummy variable for differential abundance analysis
+
+da_physeq_Family <- microbiome::aggregate_taxa(da_physeq, "Family") # 27 families
+da_physeq_Family_dummy <- microbiome::aggregate_taxa(da_physeq, "Family") # make a dummy for Maaslin
+otu_table(da_physeq_Family_dummy)[otu_table(da_physeq_Family_dummy) == 0] <- 1 ## convert 0 to 1.00001 for dummy variable for differential abundance analysis
+
+
+#########################################################################################################################################################
+# convert to relative abundance for differential abundance heatmap plotting
+# aggregate to different taxonomic ranks
+da_physeq_Species_rel <- microbiome::transform(da_physeq_Species, "compositional")
+da_physeq_Genus_rel <- microbiome::transform(da_physeq_Genus, "compositional")
+da_physeq_Family_rel <- microbiome::transform(da_physeq_Family, "compositional")
+```
+
+
+#2. Quality control
+##1.1 Library quantification
+```{r DNA_yield, echo=FALSE, fig.height=7, message=FALSE, warning=FALSE, paged.print=TRUE}
+# load data
+sample_label <- rownames(metadata)
+metadata$sample_label <- sample_label
+
+
+metadata <- metadata %>%
+  filter(!(Individual == "Donor_09" | sample_label %in% c( # "D1008ALG05", "D1102ALG05",
+    "D1105ALG05", "D1109ALG05", "D0503ALG04"
+  ))) %>%
+  mutate(Timepoint = factor(Timepoint, levels = c("T00", "T01", "T02", "T03", "T04"))) %>%
+  mutate(sample_label = factor(sample_label, metadata$sample_label, ordered = TRUE)) %>%
+  mutate(Quantification = as.numeric(Quantification))
+
+#########################################################################################################################################################
+## plot DNA yield
+
+dna_quant <- ggplot(metadata, aes_string(x = "sample_label", y = "Quantification", fill = "Individual")) +
+  geom_col(alpha = 0.75) +
+  labs(x = NULL, y = "Quantification [nM]", title = "Library quantification") +
+  scale_fill_manual(values = c("Donor_05" = "#198687", "Donor_06" = "#f93d91", "Donor_10" = "#9430b5", "Donor_11" = "#56a2fd")) +
+  theme_bw(base_size = 12) +
+  facet_nested(~ Individual + Donation, scales = "free", space = "free_x") +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "right",
+    legend.direction = "vertical"
+  ) +
+  guides(
+    colour = guide_legend(nrow = 1),
+    fill = guide_legend(title = "Individual")
+  )
+
+dna_quant
+```
+
+
+##1.2 Filtered reads 
+```{r Reads_yield, echo=FALSE, fig.height=7, fig.width=8, message=FALSE, warning=FALSE, paged.print=TRUE}
+# Load data with the number of filtered and maintained reads obtained from zAMP pipeline
+filtered_maintained_reads <- read.csv(file = "/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/DADA2/5_visualization/RDP_ezbiocloud/reads/raw_to_filtered_reads_stats.tsv", sep = "\t", header = TRUE, row.names = 1) %>%
+  filter(!(Individual == "Donor_09" | sample_label %in% c( # "D1008ALG05", "D1102ALG05",
+    "D1105ALG05", "D1109ALG05", "D0503ALG04"
+  ))) %>%
+  mutate(Timepoint = factor(Timepoint, levels = c("T00", "T01", "T02", "T03", "T04"))) %>%
+  mutate(Reads = factor(Reads, levels = c("Tax filtered reads", "Reads processing", "Maintained reads"))) %>%
+  mutate(Count = as.numeric(Count))
+
+#########################################################################################################################################################
+### Plot overall reads
+
+overall_reads <- ggplot(filtered_maintained_reads, aes_string(x = "Timepoint", y = "Count", fill = "Reads")) +
+  geom_col() +
+  scale_fill_manual(values = c("Tax filtered reads" = "#8DD3C7", "Reads processing" = "#80B1D3", "Maintained reads" = "#D9D9D9")) +
+  labs(x = "Sample", y = "Reads", title = "Overall reads") +
+  facet_nested(~ Individual + Donation, scales = "free", space = "free_x") +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)
+  )
+
+overall_reads
+```
+
+
+##1.3 Rarefaction curve
+```{r}
+# plot rarefaction curve
+set.seed(12345)
+rcurve <- ranacapa::ggrare(physeq_no_raref, step = 1000, color = "Individual", label = "sample_label", se = FALSE) +
+  labs(title = "Rarefaction curve", x = "Depth (reads)", y = "Nonrarefied number of ASVs") +
+  theme_bw(base_size = 12) +
+  scale_color_manual(values = c("Donor_05" = "#198687", "Donor_06" = "#f93d91", "Donor_10" = "#9430b5", "Donor_11" = "#56a2fd")) +
+  scale_x_continuous(expand = expansion(mult = c(0.05, 0.25)))
+
+rcurve
+```
+
+
+##1.4 Combine plots
+```{r}
+# combine dna quantity and overall reads plot
+qc <- ggarrange(dna_quant, overall_reads, nrow = 2, labels = c("A", "B"), align = c("v"), heights = c(0.8, 1), font.label = list(color = "red", face = "bold"))
+qc
+
+rcurve <- ggarrange(rcurve, labels = c("C"), font.label = list(color = "red", face = "bold"), legend = FALSE)
+rcurve
+
+# combine all QC plots together
+qc_rcurve <- ggarrange(qc, rcurve, ncol = 2, widths = c(1, 0.5))
+qc_rcurve
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/qc_rcurve.svg", width = 18, height = 6.5)
+```
+
+
+#3 Cohort demographic
+```{r}
+# create upset plot for patient demographic breakdown
+# create logical metadata
+upset_meta <- metadata %>%
+  select(Individual, Antibiotic, Disease) %>%
+  distinct(Individual, .keep_all = TRUE) %>%
+  pivot_wider(names_from = c(Disease), values_from = c(Disease)) %>%
+  mutate(across(3:5, ~ !is.na(.))) # convert columns 5-6 into logical
+
+# extract name of variables we are interested in (timepoint, in this case)
+variables <- colnames(upset_meta[, 3:5])
+
+# plot
+upset(
+  upset_meta,
+  variables,
+  name = "Distribution of samples",
+  base_annotations = list(
+    "Intersection size" = intersection_size(
+      counts = TRUE,
+      mapping = aes(fill = Antibiotic)
+    ) +
+      scale_fill_manual(values = c(
+        "Antibiotic" = "#444444",
+        "None" = "#bcbcbc"
+      )) +
+      theme_bw(base_size = 12) +
+      theme(
+        axis.title.x = element_blank(), # to remove the x-axis labels
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()
+      )
+  ),
+  width_ratio = 0.4,
+  queries = list(
+    upset_query(set = "Campylobacter", fill = "#5a1874"),
+    upset_query(set = "Salmonella", fill = "#66c2a5"),
+    upset_query(set = "Shigella", fill = "#998100")
+  ),
+  set_sizes = upset_set_size() +
+    geom_text(aes(label = ..count..), stat = "count", hjust = 1.1, color = "black", size = 3) + # Add count labels
+    expand_limits(y = 15) + # Adjust the limits of y-axis
+    theme(axis.text.x = element_text(angle = 90)) # Rotate x-axis labels
+)
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/cohort_demographic_distribution.svg", height = 4.5, width = 7)
+
+#########################################################################################################################################################
+
+
+# load the cohort data
+cohort_dem <- read.csv("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Metadata_Run_19_longitudinal.tsv", sep = "\t") %>%
+  mutate(BMI = as.numeric(BMI)) %>%
+  mutate(Birth_year = as.numeric(Birth_year)) %>%
+  mutate(Age_2024 = 2024 - Birth_year) %>%
+  mutate(BMI_category = case_when(
+    BMI <= 18.5 ~ "Underweight",
+    BMI >= 18.6 & BMI <= 24.9 ~ "Normal",
+    BMI >= 25 & BMI <= 29.9 ~ "Overweight",
+    BMI >= 30 ~ "Obese",
+    TRUE ~ "Unknown"
+  )) %>%
+  mutate(BMI_category = factor(BMI_category, levels = c("Underweight", "Normal", "Overweight", "Obese", "Unknown"))) %>%
+  distinct(Individual, .keep_all = TRUE)
+
+#########################################################################################################################################################
+# Disease Timepoint
+participants <- length(unique(cohort_dem$Individual))
+
+table(cohort_dem$Timepoint) # frequency of each group
+table(cohort_dem$Disease)
+round((table(cohort_dem$Disease) / participants) * 100, 1) # proportion of each group
+sum(round((table(cohort_dem$Disease) / participants) * 100, 1)) # make sure = 100
+
+#########################################################################################################################################################
+# Age
+
+aggregate(cohort_dem$Age_2024, function(x) c(mean = mean(x), sd = sd(x)), by = list(cohort_dem$Disease)) # calculate standard deviation
+
+#########################################################################################################################################################
+# Sex
+
+table(cohort_dem$Sex, cohort_dem$Disease)
+round(prop.table(table(cohort_dem$Sex, cohort_dem$Disease), margin = 2) * 100, 1) # margin = 2 calculates proportions within each column (i.e., each Disease)
+
+#########################################################################################################################################################
+# BMI
+
+table(cohort_dem$BMI_category, cohort_dem$Disease)
+round(prop.table(table(cohort_dem$BMI_category, cohort_dem$Disease), margin = 2) * 100, 1)
+sum(round(prop.table(table(cohort_dem$BMI_category, cohort_dem$Disease), margin = 2) * 100, 1)) # make sure = 300
+aggregate(cohort_dem$BMI, function(x) c(mean = mean(x, na.rm = TRUE), sd = sd(x, na.rm = TRUE)), by = list(cohort_dem$Disease)) # calculate standard deviation
+
+#########################################################################################################################################################
+# Antibiotic drug
+
+table(cohort_dem$Antibiotic, cohort_dem$Disease)
+round(prop.table(table(cohort_dem$Antibiotic, cohort_dem$Disease), margin = 2) * 100, 1)
+
+table(cohort_dem$Drug, cohort_dem$Disease)
+round(prop.table(table(cohort_dem$Drug, cohort_dem$Disease), margin = 2) * 100, 1)
+sum(round(prop.table(table(cohort_dem$Drug, cohort_dem$Disease), margin = 2) * 100, 1)) # make sure = 100
+
+#########################################################################################################################################################
+# manually add all the stats to a .csv file
+# load the stats file
+demographic <- read.csv("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/Data/demographic_table.csv") %>%
+  magrittr::set_colnames(c("", "Campylobacter", "Salmonella", "Shigella"))
+
+demo_table <- kbl(demographic,
+  caption = "Cohort demographic", align = "c", color = "black", bold = TRUE,
+  # table.attr = "style='width:70%;'",
+  format = "latex"
+) %>%
+  # kable_styling(latex_options="scale_down", font_size = 7) %>%
+  # kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+  pack_rows("Age", 2, 2, bold = TRUE) %>%
+  pack_rows("Sex", 3, 4, bold = TRUE) %>%
+  pack_rows("BMI", 5, 10, bold = TRUE) %>%
+  pack_rows("Diet", 11, 11, bold = TRUE) %>%
+  pack_rows("Antibiotic", 12, 20, bold = TRUE) %>%
+  column_spec(1, width = "1.5cm") %>%
+  column_spec(2, width = "3cm") %>%
+  column_spec(3, width = "3cm") %>%
+  column_spec(4, width = "3cm")
+
+# save as overleaf tbale
+save_kable(demo_table, file = "/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/cohort_demographic_table.tex")
+# save_kable(demo_table, file = "/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/cohort_demographic_table.png", zoom = 3)
+```
+
+
+
+#4 Alpha diversity
+##4.1 Status
+```{r}
+# make a list of comparisons for the stats
+alpha_comparisons <- microbiomeutilities::make_pairs(alpha_indexes$Timepoint)
+
+#########################################################################################################################################################
+# calculate average time difference
+time_diff <- alpha_indexes %>%
+  dplyr::select("Donation", "Timepoint", "Time_diff") %>%
+  mutate(Timepoint = factor(Timepoint, levels = c("T00", "T01", "T02", "T03", "T04"))) %>%
+  pivot_wider(names_from = "Timepoint", values_from = "Time_diff") %>%
+  column_to_rownames("Donation") %>%
+  mutate_all(function(x) as.numeric(as.character(x)))
+
+colMeans(time_diff, na.rm = TRUE)
+
+# statistical analysis using a linear mixed effects model ------------------------------------------------------------------------------------------------------------------
+# Chao1
+# set.seed for reproducability
+set.seed(12345)
+alpha_chao <- nlme::lme(Chao1 ~ Time_diff, random = ~ 1 | Individual / Donation, data = alpha_indexes) # introduces random variable with normal distribution, adding random value to each donor to try to explain variation. univaraite analyssi using sample type but takes into account that some samples come from same patient. Donation is nested into individual
+
+anova(alpha_chao) # 0.7757
+chao_anova <- signif(anova(alpha_chao)$`p-value`[2], digits = 2)
+
+# chao_perf <- performance(alpha_chao) # calculate r2
+# chao_r2_cond <- signif(chao_perf$R2_conditional, digits = 2)
+# chao_r2_marg <- signif(chao_perf$R2_marginal, digits = 2)
+
+
+# Pielou
+# set.seed for reproducability
+set.seed(12345)
+alpha_pielou <- nlme::lme(Pielou ~ Time_diff, random = ~ 1 | Individual / Donation, data = alpha_indexes)
+
+anova(alpha_pielou) # 0.321
+pie_anova <- signif(anova(alpha_pielou)$`p-value`[2], digits = 2)
+
+# pie_perf <- performance(alpha_pielou) # calculate r2
+# pie_r2_cond <- signif(pie_perf$R2_conditional, digits = 2)
+# pie_r2_marg <- signif(pie_perf$R2_marginal, digits = 2)
+
+
+# Shannon
+# set.seed for reproducability
+set.seed(12345)
+alpha_shannon <- nlme::lme(Shannon ~ Time_diff, random = ~ 1 | Individual / Donation, data = alpha_indexes)
+
+anova(alpha_shannon) # 0.5269
+shan_anova <- signif(anova(alpha_shannon)$`p-value`[2], digits = 2)
+
+# shan_perf <- performance(alpha_shannon) # calculate r2
+# shan_r2_cond <- signif(shan_perf$R2_conditional, digits = 2)
+# shan_r2_marg <- signif(shan_perf$R2_marginal, digits = 2)
+
+#########################################################################################################################################################
+# manually add p value ------------------------------------------------------------------------------------------------------------------------------------------------------
+# Increase the indentation before "LME" and "Time"
+chao_values <- paste(
+  "    LME:", "\n", # Add spaces or tabs for indentation
+  "    Time =", chao_anova, "\n"
+  # "R2 conditional =", chao_r2_cond, "\n",
+  # "R2 marginal =", chao_r2_marg
+)
+
+pie_values <- paste(
+  "    LME:", "\n",
+  "    Time =", pie_anova, "\n"
+  # "R2 conditional =", pie_r2_cond, "\n",
+  # "R2 marginal =", pie_r2_marg
+)
+
+shan_values <- paste(
+  "    LME:", "\n",
+  "    Time =", shan_anova, "\n"
+  # "R2 conditional =", shan_r2_cond, "\n",
+  # "R2 marginal =", shan_r2_marg
+)
+
+
+### plot chao1 -------------------------------------------------------------------------------------------------------------------------------------------
+chao_plot_date <- ggplot(alpha_indexes, aes(as.Date(Month_sequenced),
+  y = Chao1,
+  colour = Individual,
+  fill = Individual,
+  shape = Timepoint,
+  linetype = Individual
+)) +
+  geom_line(aes(group = Donation, color = Individual), size = 0.5) +
+  geom_point(alpha = 0.85) +
+  labs(title = "Chao1 index", x = NULL, y = NULL) +
+  theme_bw(base_size = 12) +
+  scale_x_date(date_breaks = "2 months", date_labels = "%b %Y") + # Adjust to skip every other month
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + # Rotate labels for better readability
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  scale_shape_manual(values = c("T00" = 21, "T01" = 22, "T02" = 23, "T03" = 24, "T04" = 25)) +
+  scale_fill_manual(name = "Individual", values = c("Donor_05" = "#198687", "Donor_06" = "#f93d91", "Donor_10" = "#9430b5", "Donor_11" = "#56a2fd")) +
+  scale_color_manual(name = "Individual", values = c("Donor_05" = "#198687", "Donor_06" = "#f93d91", "Donor_10" = "#9430b5", "Donor_11" = "#56a2fd")) +
+  scale_linetype_manual(name = "Individual", values = c("Donor_05" = "solid", "Donor_06" = "longdash", "Donor_10" = "twodash", "Donor_11" = "dotted")) +
+  geom_text(
+    x = -Inf,
+    y = -Inf,
+    label = chao_values,
+    hjust = 0,
+    vjust = 0,
+    color = "#5b5b5b",
+    fontface = "plain",
+    size = 4,
+    family = "Arial"
+  )
+
+
+### plot Pielou ------------------------------------------------------------------------------------------------------------------------------------------------------
+
+pie_plot_date <- ggplot(alpha_indexes, aes(as.Date(Month_sequenced),
+  y = Pielou,
+  colour = Individual,
+  fill = Individual,
+  shape = Timepoint,
+  linetype = Individual
+)) +
+  geom_line(aes(group = Donation, color = Individual), size = 0.5) +
+  geom_point(alpha = 0.85) +
+  labs(title = "Pielou index", x = NULL, y = NULL) +
+  theme_bw(base_size = 12) +
+  scale_x_date(date_breaks = "2 months", date_labels = "%b %Y") + # Adjust to skip every other month
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + # Rotate labels for better readability
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  scale_shape_manual(values = c("T00" = 21, "T01" = 22, "T02" = 23, "T03" = 24, "T04" = 25)) +
+  scale_fill_manual(name = "Individual", values = c("Donor_05" = "#198687", "Donor_06" = "#f93d91", "Donor_10" = "#9430b5", "Donor_11" = "#56a2fd")) +
+  scale_color_manual(name = "Individual", values = c("Donor_05" = "#198687", "Donor_06" = "#f93d91", "Donor_10" = "#9430b5", "Donor_11" = "#56a2fd")) +
+  scale_linetype_manual(name = "Individual", values = c("Donor_05" = "solid", "Donor_06" = "longdash", "Donor_10" = "twodash", "Donor_11" = "dotted")) +
+  geom_text(
+    x = -Inf,
+    y = -Inf,
+    label = pie_values,
+    hjust = 0,
+    vjust = 0,
+    color = "#5b5b5b",
+    fontface = "plain",
+    size = 4,
+    family = "Arial"
+  )
+
+
+
+### plot shannon ------------------------------------------------------------------------------------------------------------------------------------------------------
+
+shan_plot_date <- ggplot(alpha_indexes, aes(as.Date(Month_sequenced),
+  y = Shannon,
+  colour = Individual,
+  fill = Individual,
+  shape = Timepoint,
+  linetype = Individual
+)) +
+  geom_line(aes(group = Donation, color = Individual), size = 0.5) +
+  geom_point(alpha = 0.85) +
+  labs(title = "Shannon index", x = NULL, y = NULL) +
+  theme_bw(base_size = 12) +
+  scale_x_date(date_breaks = "2 months", date_labels = "%b %Y") + # Adjust to skip every other month
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + # Rotate labels for better readability
+  scale_shape_manual(values = c("T00" = 21, "T01" = 22, "T02" = 23, "T03" = 24, "T04" = 25)) +
+  scale_fill_manual(name = "Individual", values = c("Donor_05" = "#198687", "Donor_06" = "#f93d91", "Donor_10" = "#9430b5", "Donor_11" = "#56a2fd")) +
+  scale_color_manual(name = "Individual", values = c("Donor_05" = "#198687", "Donor_06" = "#f93d91", "Donor_10" = "#9430b5", "Donor_11" = "#56a2fd")) +
+  scale_linetype_manual(name = "Individual", values = c("Donor_05" = "solid", "Donor_06" = "longdash", "Donor_10" = "twodash", "Donor_11" = "dotted")) +
+  geom_text(
+    x = -Inf,
+    y = -Inf,
+    label = shan_values,
+    hjust = 0,
+    vjust = 0,
+    color = "#5b5b5b",
+    fontface = "plain",
+    size = 4,
+    family = "Arial"
+  )
+```
+
+##4.2 Combine status alpha plots
+```{r}
+# Combine plots
+alpha_plot_date <- ggarrange(chao_plot_date, pie_plot_date, shan_plot_date, nrow = 3, labels = c("A", "B", "C"), common.legend = TRUE, legend = "right", font.label = list(color = "red", face = "bold"), heights = c(1, 1, 1.2))
+alpha_plot_date
+
+# add y-axis label
+alpha_plot_date <- annotate_figure(alpha_plot_date,
+  left = textGrob("Alpha diversity measure", rot = 90, vjust = 1),
+  top = text_grob("Alpha diversity", size = 15, color = "#0f4761", face = "bold")
+)
+
+alpha_plot_date
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/alpha_diversity_date.svg", width = 7, height = 8)
+```
+
+
+#5. Beta diversity
+##5.1 Bray-Curtis timepoint
+```{r}
+# We will check the bray-curtis distance at the species level
+# calculate distance matrix
+set.seed(12345)
+bray_dist <- phyloseq::distance(physeq_Species, method = "bray", binary = FALSE)
+
+# calculate ordination
+bray_ordination <- ordinate(physeq_Species, method = "NMDS", distance = bray_dist)
+bray_stress <- signif(bray_ordination$stress, digits = 2)
+
+#########################################################################################################################################################
+# statistical test for beta diversity
+
+# input files for statistical analysis
+bray_meta <- data.frame(sample_data(physeq_Species))
+bray_Species <- data.frame(otu_table(physeq_Species))
+
+#########################################################################################################################################################
+# calculate permanova
+set.seed(12345)
+bray_permanova <- adonis2(t(bray_Species) ~ Timepoint,
+  data = bray_meta, permutations = 999, method = "bray", binary = FALSE, p.adjust.m = "BH", strata = bray_meta$Individual
+)
+
+bray_permanova_timepoint <- signif(bray_permanova[["Pr(>F)"]][1], digits = 2)
+
+#########################################################################################################################################################
+# calculate beta-dispersion
+set.seed(12345)
+bray_dispersion_timepoint <- anova(betadisper(bray_dist, bray_meta$Timepoint))
+
+bray_dispersion_timepoint <- signif(bray_dispersion_timepoint[["Pr(>F)"]][1], digits = 2)
+
+#########################################################################################################################################################
+# add bray-curtis distance p values
+bray_values <- paste(
+  "Stress =", bray_stress, "\n",
+  "Dispersion:", bray_dispersion_timepoint, "\n",
+  "PERMANOVA:", bray_permanova_timepoint, "\n"
+)
+
+#########################################################################################################################################################
+### plot by timepoint
+beta_bray <- plot_ordination(physeq_Species, bray_ordination, type = "samples", color = "Timepoint", shape = "Individual") +
+  stat_ellipse(aes(color = Timepoint, group = Timepoint), alpha = 0.8) +
+  theme_bw(base_size = 12) +
+  labs(title = "Bray-Curtis dissimilarity", x = NULL) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "vertical",
+    legend.spacing.y = unit(0, "lines"),
+    legend.margin = margin(0, 0, 0, 0)
+  ) + # reduce spacing between legends
+  scale_color_manual(values = c("T00" = "#bb7c3c", "T01" = "#f06d36", "T02" = "#009874", "T03" = "#003d63", "T04" = "#440439")) +
+  scale_shape_manual(values = c("Donor_05" = 21, "Donor_06" = 22, "Donor_10" = 23, "Donor_11" = 24)) +
+  scale_fill_manual(values = c("T00" = "#bb7c3c", "T01" = "#f06d36", "T02" = "#009874", "T03" = "#003d63", "T04" = "#440439")) +
+  guides(color = guide_legend(title = "Timepoint", nrow = 1), shape = guide_legend(title = "Individual")) + # Properly nest nrow within guide_legend
+  geom_text(x = Inf, y = Inf, label = bray_values, hjust = 1, vjust = 1, color = "#5b5b5b", fontface = "plain", size = 4, family = "Arial")
+
+beta_bray
+```
+
+###5.1.2 Bray-curtis distance time difference
+```{r}
+# We will check the bray-curtis distance at the species level
+# calculate distance matrix
+set.seed(12345)
+bray_dist <- phyloseq::distance(physeq_Species, method = "bray", binary = FALSE)
+
+# calculate ordination
+bray_ordination <- ordinate(physeq_Species, method = "NMDS", distance = bray_dist)
+bray_stress <- signif(bray_ordination$stress, digits = 2)
+
+#########################################################################################################################################################
+# statistical test for beta diversity
+# input files for statistical analysis
+bray_meta <- data.frame(sample_data(physeq_Species))
+bray_Species <- data.frame(otu_table(physeq_Species))
+
+#########################################################################################################################################################
+# calculate permanova
+set.seed(12345)
+bray_permanova <- adonis2(t(bray_Species) ~ Time_diff,
+  data = bray_meta, permutations = 999, method = "bray", binary = FALSE, p.adjust.m = "BH", strata = bray_meta$Individual
+)
+
+bray_permanova_time_diff <- signif(bray_permanova[["Pr(>F)"]][1], digits = 2)
+
+
+adonis2(t(bray_Species) ~ Donation,
+  data = bray_meta, permutations = 999, method = "bray", binary = FALSE, p.adjust.m = "BH", strata = bray_meta$Individual
+)
+
+adonis2(t(bray_Species) ~ Individual / Donation,
+  data = bray_meta, permutations = 999, method = "bray", binary = FALSE, p.adjust.m = "BH", strata = bray_meta$Individual
+)
+
+#########################################################################################################################################################
+# calculate beta-dispersion
+
+set.seed(12345)
+bray_dispersion_time_diff <- anova(betadisper(bray_dist, bray_meta$Time_diff))
+
+bray_dispersion_time_diff <- signif(bray_dispersion_time_diff[["Pr(>F)"]][1], digits = 2)
+
+#########################################################################################################################################################
+# add bray-curtis distance p values
+
+bray_values <- paste(
+  "Stress =", bray_stress, "\n",
+  "Dispersion:", bray_dispersion_time_diff, "\n",
+  "PERMANOVA:", bray_permanova_time_diff, "\n"
+)
+
+#########################################################################################################################################################
+### plot
+
+# plot bray-curtis distance
+beta_bray <- plot_ordination(physeq_Species, bray_ordination, type = "samples", color = "Individual", shape = "Timepoint") +
+  stat_ellipse(aes(group = Individual), alpha = 0.8) +
+  theme_bw(base_size = 12) +
+  labs(title = "Bray-Curtis dissimilarity", x = NULL) +
+  theme(legend.position = "none") +
+  scale_color_manual(values = c("Donor_05" = "#198687", "Donor_06" = "#f93d91", "Donor_10" = "#9430b5", "Donor_11" = "#56a2fd")) +
+  scale_shape_manual(values = c("T00" = 21, "T01" = 22, "T02" = 23, "T03" = 24, "T04" = 25)) +
+  scale_fill_manual(values = c("Donor_05" = "#198687", "Donor_06" = "#f93d91", "Donor_10" = "#9430b5", "Donor_11" = "#56a2fd")) +
+  geom_text(x = Inf, y = Inf, label = bray_values, hjust = 1, vjust = 1, color = "#5b5b5b", fontface = "plain", size = 4, family = "Arial")
+
+beta_bray
+```
+
+
+##5.2 Jaccard timepoint
+```{r}
+# We will check the jac-curtis distance at the species level
+# calculate distance matrix
+set.seed(12345)
+jac_dist <- phyloseq::distance(physeq_Species, method = "jaccard", binary = TRUE)
+
+# calculate ordination
+jac_ordination <- ordinate(physeq_Species, method = "NMDS", distance = jac_dist)
+jac_stress <- signif(jac_ordination$stress, digits = 2)
+
+#########################################################################################################################################################
+# statistical test for beta diversity
+
+# input files for statistical analysis
+jac_meta <- data.frame(sample_data(physeq_Species))
+jac_Species <- data.frame(otu_table(physeq_Species))
+
+#########################################################################################################################################################
+# calculate permanova
+set.seed(12345)
+jac_permanova <- adonis2(t(jac_Species) ~ Timepoint,
+  data = jac_meta, permutations = 999, method = "jaccard", binary = TRUE, p.adjust.m = "BH", strata = jac_meta$Individual
+)
+
+jac_permanova_timepoint <- signif(jac_permanova[["Pr(>F)"]][1], digits = 2)
+
+#########################################################################################################################################################
+# calculate beta-dispersion
+set.seed(12345)
+jac_dispersion_timepoint <- anova(betadisper(jac_dist, jac_meta$Timepoint))
+
+jac_dispersion_timepoint <- signif(jac_dispersion_timepoint[["Pr(>F)"]][1], digits = 2)
+
+
+#########################################################################################################################################################
+# add jac-curtis distance p values
+jac_values <- paste(
+  "Stress =", jac_stress, "\n",
+  "Dispersion:", jac_dispersion_timepoint, "\n",
+  "PERMANOVA:", jac_permanova_timepoint, "\n"
+)
+
+#########################################################################################################################################################
+### plot by timepoint
+beta_jac <- plot_ordination(physeq_Species, jac_ordination, type = "samples", color = "Timepoint", shape = "Individual") +
+  stat_ellipse(aes(color = Timepoint, group = Timepoint), alpha = 0.8) +
+  theme_bw(base_size = 12) +
+  labs(title = "Jaccard index", x = NULL) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "vertical", # Adjust legend position and orientation
+    legend.spacing.y = unit(0, "lines"),
+    legend.margin = margin(0, 0, 0, 0)
+  ) + # reduce spacing between legends
+  scale_color_manual(values = c("T00" = "#bb7c3c", "T01" = "#f06d36", "T02" = "#009874", "T03" = "#003d63", "T04" = "#440439")) +
+  scale_shape_manual(values = c("Donor_05" = 21, "Donor_06" = 22, "Donor_10" = 23, "Donor_11" = 24)) +
+  scale_fill_manual(values = c("T00" = "#bb7c3c", "T01" = "#f06d36", "T02" = "#009874", "T03" = "#003d63", "T04" = "#440439")) +
+  guides(color = guide_legend(title = "Timepoint", nrow = 1), shape = guide_legend(title = "Individual")) + # Properly nest nrow within guide_legend
+  geom_text(x = Inf, y = Inf, label = jac_values, hjust = 1, vjust = 1, color = "#5b5b5b", fontface = "plain", size = 4, family = "Arial")
+
+
+beta_jac
+```
+
+
+###5.2.1 Jaccard distance time difference
+```{r}
+# We will check the jaccard distance at the species level
+# calculate distance matrix
+set.seed(12345)
+jac_dist <- phyloseq::distance(physeq_Species, method = "jaccard", binary = TRUE)
+
+# calculate ordination
+jac_ordination <- ordinate(physeq_Species, method = "NMDS", distance = jac_dist)
+jac_stress <- signif(jac_ordination$stress, digits = 2)
+
+#########################################################################################################################################################
+# statistical test for beta diversity
+# input files for statistical analysis
+jac_meta <- data.frame(sample_data(physeq_Species))
+jac_Species <- data.frame(otu_table(physeq_Species))
+
+#########################################################################################################################################################
+# calculate permanova
+set.seed(12345)
+jac_permanova <- adonis2(t(jac_Species) ~ Time_diff,
+  data = jac_meta, permutations = 999, method = "jaccard", binary = TRUE, p.adjust.m = "BH", strata = jac_meta$Individual
+)
+
+jac_permanova_time_diff <- signif(jac_permanova[["Pr(>F)"]][1], digits = 2)
+
+#########################################################################################################################################################
+# calculate beta-dispersion
+set.seed(12345)
+jac_dispersion_time_diff <- anova(betadisper(jac_dist, jac_meta$Time_diff))
+
+jac_dispersion_time_diff <- signif(jac_dispersion_time_diff[["Pr(>F)"]][1], digits = 2)
+
+#########################################################################################################################################################
+# add jaccard distance p values
+jac_values <- paste(
+  "Stress =", jac_stress, "\n",
+  "Dispersion:", jac_dispersion_time_diff, "\n",
+  "PERMANOVA:", jac_permanova_time_diff, "\n"
+)
+
+#########################################################################################################################################################
+### plot
+# plot jaccard distance
+beta_jac <- plot_ordination(physeq_Species, jac_ordination, type = "samples", color = "Individual", shape = "Timepoint") +
+  stat_ellipse(aes(group = Individual), alpha = 0.8) +
+  theme_bw(base_size = 12) +
+  labs(title = "Jaccard index", x = NULL) +
+  theme(legend.position = "none") +
+  scale_color_manual(values = c("Donor_05" = "#198687", "Donor_06" = "#f93d91", "Donor_10" = "#9430b5", "Donor_11" = "#56a2fd")) +
+  scale_shape_manual(values = c("T00" = 21, "T01" = 22, "T02" = 23, "T03" = 24, "T04" = 25)) +
+  scale_fill_manual(values = c("Donor_05" = "#198687", "Donor_06" = "#f93d91", "Donor_10" = "#9430b5", "Donor_11" = "#56a2fd")) +
+  geom_text(x = Inf, y = Inf, label = jac_values, hjust = 1, vjust = 1, color = "#5b5b5b", fontface = "plain", size = 4, family = "Arial")
+
+beta_jac
+```
+
+##5.3 Combine beta plots
+```{r}
+beta_plot <- ggarrange(beta_jac, beta_bray, nrow = 1, labels = c("A", "B"), common.legend = TRUE, legend = "bottom", font.label = list(color = "red", face = "bold"))
+beta_plot
+
+# add y-axis label
+beta_plot <- annotate_figure(beta_plot,
+  left = textGrob("NMDS", rot = 90, vjust = 1),
+  top = text_grob("Beta diversity", size = 15, color = "#0f4761", face = "bold")
+)
+
+beta_plot
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/beta_diversity_timepoint.svg", width = 8, height = 4)
+```
+
+
+##5.4 Combine alpha + beta diversity plots 
+```{r}
+#############
+# Combine plots
+alpha_beta <- ggarrange(alpha_plot_date, NULL, beta_plot,
+  nrow = 1,
+  # widths = c(5, 0.25, 2.5),
+  widths = c(5, 0.25, 3.75),
+  legend = TRUE, common.legend = TRUE
+)
+alpha_beta
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/alpha_beta_disease_wide.svg", width = 13, height = 9)
+```
+
+
+##6.2 Identify taxa shared between Day_10 and Day_30
+```{r}
+# identify taxa intersection between groups
+intersection <- MicEco::ps_venn(ps = da_physeq_Species, group = "Timepoint", plot = FALSE)
+
+# intersection between asym and Day_30
+d10_d30_intersect <- as.data.frame(intersection$Day_10__Day_30) %>%
+  magrittr::set_colnames("Taxa") %>%
+  mutate(Type = "Day_10_Day_30")
+
+# merge
+tax_asign <- data.frame(tax_table(da_physeq_Species))
+d10_d30_intersect <- d10_d30_intersect %>%
+  inner_join(tax_asign, by = c("Taxa" = "Species"))
+
+# average number of unique species found across the 4 donors
+table(d10_d30_intersect$Order) # 51/64 belong to Clostridiales and 7/64 Bacteroidales
+table(d10_d30_intersect$Family) # 30/64 belong to Ruminococcaceae and 11/64 Lachnospiraceae
+```
+
+#7 Dendo-clustering
+##7.1 Bray-Curtis status Species
+```{r}
+# Bray-Curtis dendogram
+# create a subset of the metadata
+meta_sub <- metadata %>% dplyr::select(sample_label)
+
+dendo_Species_bray <- t(data.frame(otu_table(physeq_Species))) %>% as.matrix()
+
+dendo_bray_distance <- vegan::vegdist(dendo_Species_bray, method = "bray", binary = FALSE)
+
+# Create the dendrogram
+dendo_bray <- as.dendrogram(hclust(dendo_bray_distance, method = "ward.D2"))
+
+# Get the order of the dendrogram
+dendo_order_bray <- labels(dendo_bray)
+
+# Create the meta dataframe and assign colors
+dendo_meta_bray <- data.frame(phyloseq::sample_data(physeq_Species)) %>%
+  mutate(Individual = factor(Individual, levels = c("Donor_05", "Donor_06", "Donor_10", "Donor_11"))) %>%
+  mutate(Timepoint = factor(Timepoint, levels = c("T00", "T01", "T02", "T03", "T04"))) %>%
+  mutate(dendo_color_bray = case_when( # create color abd shapes for dendogram
+    Individual == "Donor_05" ~ "#198687",
+    Individual == "Donor_06" ~ "#f93d91",
+    Individual == "Donor_10" ~ "#9430b5",
+    Individual == "Donor_11" ~ "#56a2fd"
+  )) %>%
+  mutate(dendo_point_bray = case_when(
+    Timepoint == "T00" ~ 21,
+    Timepoint == "T01" ~ 22,
+    Timepoint == "T02" ~ 23,
+    Timepoint == "T03" ~ 24,
+    Timepoint == "T04" ~ 25
+  ))
+
+# Reorder dendo_meta based on dendo_order
+dendo_meta_bray <- dendo_meta_bray %>% arrange(factor(sample_label, levels = dendo_order_bray))
+
+# Extract colors in the correct order
+dendo_color_bray <- dendo_meta_bray$dendo_color_bray
+
+# Assign colors to dendrogram leaves based on the reordered dendo_color2
+labels_colors(dendo_bray) <- dendo_color_bray
+
+# Assume 'Timepoint' contains values that determine the symbol on each leaf
+leaf_symbols_bray <- dendo_meta_bray$dendo_point_bray # Convert to character for leaf symbols
+```
+
+
+##7.2 Jaccard status Species
+```{r}
+# jaccard
+dendo_Species_jac <- t(data.frame(otu_table(physeq_Species))) %>%
+  as.matrix()
+
+dendo_jac_distance <- vegan::vegdist(dendo_Species_jac, method = "jaccard", binary = TRUE)
+
+# Create the dendrogram
+dendo_jac <- as.dendrogram(hclust(dendo_jac_distance, method = "ward.D2"))
+
+# Get the order of the dendrogram
+dendo_order_jac <- labels(dendo_jac)
+
+# Create the meta dataframe and assign colors
+dendo_meta_jac <- data.frame(phyloseq::sample_data(physeq_Species)) %>%
+  mutate(Individual = factor(Individual, levels = c("Donor_05", "Donor_06", "Donor_10", "Donor_11"))) %>%
+  mutate(Timepoint = factor(Timepoint, levels = c("T00", "T01", "T02", "T03", "T04"))) %>%
+  mutate(dendo_color_jac = case_when( # create color abd shapes for dendogram
+    Individual == "Donor_05" ~ "#198687",
+    Individual == "Donor_06" ~ "#f93d91",
+    Individual == "Donor_10" ~ "#9430b5",
+    Individual == "Donor_11" ~ "#56a2fd"
+  )) %>%
+  mutate(dendo_point_jac = case_when(
+    Timepoint == "T00" ~ 21,
+    Timepoint == "T01" ~ 22,
+    Timepoint == "T02" ~ 23,
+    Timepoint == "T03" ~ 24,
+    Timepoint == "T04" ~ 25
+  ))
+
+# Reorder dendo_meta based on dendo_order
+dendo_meta_jac <- dendo_meta_jac %>% arrange(factor(sample_label, levels = dendo_order_jac))
+
+# Extract colors in the correct order
+dendo_color_jac <- dendo_meta_jac$dendo_color_jac
+
+# Assign colors to dendrogram leaves based on the reordered dendo_color2
+labels_colors(dendo_jac) <- dendo_color_jac
+
+# Assume 'Timepoint' contains values that determine the symbol on each leaf
+leaf_symbols_jac <- dendo_meta_jac$dendo_point_jac # Convert to character for leaf symbols
+```
+
+
+##7.3 Combine disease plots + legends 
+```{r}
+# combine plots
+# pdf("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/dendo_bray_Species_status.pdf", width = 14, height = 10, pointsize = 14)
+# Set up the plotting area with enough margin for the legend
+par(mfrow = c(2, 1), mar = c(5, 4, 2, 5), oma = c(2, 1, 4, 1)) 
+
+# Plot A
+dendo_jac %>%
+  dendextend::set("branches_k_lty", k = 4) %>%
+  dendextend::set("leaves_pch", value = leaf_symbols_jac) %>%
+  dendextend::set("leaves_cex", 1.5) %>%
+  dendextend::set("leaves_col", dendo_color_jac) %>%
+  plot()
+title(
+  main = "Jaccard index",
+  adj = 0.5, cex.main = 1.25, font.main = 1, line = 0.5
+)
+mtext("C", side = 3, line = 0.5, adj = 0, cex = 1, col = "red", font = 2)
+
+# Add the overarching title above both plots
+mtext("Hierarchical clustering at the species level over time",
+  side = 3, outer = TRUE,
+  line = 2, cex = 1.5, font = 2, col = "#0f4761"
+)
+
+# Plot B
+dendo_bray %>%
+  dendextend::set("branches_k_lty", k = 4) %>%
+  dendextend::set("leaves_pch", value = leaf_symbols_bray) %>%
+  dendextend::set("leaves_cex", 1.5) %>%
+  dendextend::set("leaves_col", dendo_color_bray) %>%
+  plot()
+title(
+  main = "Bray-Curtis dissimilarity",
+  adj = 0.5, cex.main = 1.25, font.main = 1, line = 0.5
+)
+mtext("D", side = 3, line = 0.5, adj = 0, cex = 1, col = "red", font = 2)
+
+# Save the plot
+dev.off()
+
+#########################################################################################################################################################
+# create plot for legend
+# pdf("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/dendo_bray_Species_legend.pdf", width = 3, height = 4.25, pointsize = 14)
+plot.new()
+
+legend("top", # Position legend at the top-right
+  title = "Individual",
+  legend = c("Donor_05", "Donor_06", "Donor_10", "Donor_11"),
+  col = c("#198687", "#f93d91", "#9430b5", "#56a2fd"), # Colors for Day_0 and Day_30
+  pch = 16, # Use a consistent shape for timepoints
+  bty = "n", # No border around the legend
+  pt.cex = 1, # Point size
+  cex = 0.9, # Text size
+  text.col = c("#198687", "#f93d91", "#9430b5", "#56a2fd"),
+  horiz = FALSE, # Vertical layout
+  inset = c(0.05, 0.05), # Adjust inset for positioning
+  y.intersp = 0.8, # Increase the space between the legend entries
+  xjust = 1,
+  yjust = 1,
+  xpd = TRUE
+)
+
+# create a legend for the antibiotic status (shapes)
+legend("bottom", # Same position to overlay, but adjust down with inset
+  title = "Timepoint",
+  legend = c("T00", "T01", "T02", "T03", "T04"),
+  col = "black", # Use black color for both
+  pch = c(21, 22, 23, 24, 25), # Shapes for no antibiotic and antibiotic
+  bty = "n", # No border around the legend
+  pt.cex = 1, # Point size
+  cex = 0.9, # Text size
+  text.col = "black",
+  horiz = FALSE, # Vertical layout
+  inset = c(0.05, -0.2), # Adjust further down (-0.2)
+  y.intersp = 0.8, # Increase the space between the legend entries
+  xjust = 1,
+  yjust = 1,
+  xpd = TRUE
+)
+
+dev.off()
+
+#########################################################################################################################################################
+# plot midpoints
+# Find the midpoint using the cut function
+midpoint_bray <- cut(dend_bray, h = "midpoint")
+
+midpoint_jac <- cut(dend_jac, h = "midpoint")
+```
+
+
+#8 Compositional barplot 
+##8.1 Genus level
+```{r}
+Genus_top <- get_top_taxa(physeq_Genus, n = 12, relative = TRUE, discard_other = FALSE)
+Genus12 <- names(sort(taxa_sums(Genus_top), TRUE)[1:12])
+Genus12 <- prune_taxa(Genus12, Genus_top)
+Genus12_rel <- microbiome::transform(Genus12, "compositional")
+
+# order samples
+sample_data(Genus12_rel)$Timepoint <- factor(x = sample_data(Genus12_rel)$Timepoint, levels = c("T00", "T01", "T02", "T03", "T04"), ordered = TRUE)
+
+# create color palette with more than 20 colors
+mycolors2 <- c(brewer.pal(name = "Paired", n = 12))
+
+# create color for each taxa
+Genus_top_taxa <- rownames(otu_table(Genus12_rel))
+
+# Create a named vector to map names to colors
+Genus_taxa_color <- setNames(mycolors2, Genus_top_taxa)
+Genus_taxa_color <- c(Genus_taxa_color, Other = "grey")
+
+#########################################################################################################################################################
+
+# plot area bar chart at the Genus level
+top_Genus_plot <- plot_area(Genus12_rel,
+  xvar = "Time_diff",
+  level = "Genus",
+  facet.by = "Donation",
+  abund.thres = 0,
+  prev.thres = 0,
+  fill.colors = Genus_taxa_color,
+  ncol = 8,
+  nrow = 5
+)
+
+top_Genus_plot <- top_Genus_plot +
+  facet_nested_wrap(~ Individual + Donation, nrow = 1) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_bw(base_size = 12) +
+  labs(title = "Genus", y = NULL, x = NULL) +
+  theme(
+    axis.text.y = element_text(vjust = 1, hjust = 1),
+    legend.position = "right",
+    legend.key.size = unit(0.8, "line")
+  ) + 
+  guides(fill = guide_legend(ncol = 1, byrow = TRUE))
+
+top_Genus_plot
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/compositional_bar_genus.svg", width = 12, height = 8)
+```
+
+##6.8 Family  level
+```{r}
+# extract the top 10 taxas at the Family level
+Family_top <- get_top_taxa(physeq_Family, n = 10, relative = TRUE, discard_other = FALSE)
+Family10 <- names(sort(taxa_sums(Family_top), TRUE)[1:10])
+Family10 <- prune_taxa(Family10, Family_top)
+Family10_rel <- microbiome::transform(Family10, "compositional")
+
+# order samples
+sample_data(Family10_rel)$Timepoint <- factor(x = sample_data(Family10_rel)$Timepoint, levels = c("T00", "T01", "T02", "T03", "T04"), ordered = TRUE)
+
+# create color for each taxa
+Family_taxa_name <- rownames(otu_table(Family10_rel))
+
+# Create a named vector to map names to colors
+Family_taxa_color <- setNames(mycolors2, Family_taxa_name)
+Family_taxa_color <- c(Family_taxa_color, Other = "grey")
+
+#########################################################################################################################################################
+
+# plot area bar chart at the Family level
+top_Family_plot <- plot_area(Family10_rel,
+  xvar = "Time_diff",
+  level = "Family",
+  facet.by = "Donation",
+  abund.thres = 0,
+  prev.thres = 0,
+  fill.colors = Family_taxa_color,
+  ncol = 8,
+  nrow = 5
+)
+
+top_Family_plot <- top_Family_plot +
+  facet_nested_wrap(~ Individual + Donation, nrow = 1) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_bw(base_size = 12) +
+  labs(title = "Family", y = NULL, x = NULL) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(vjust = 1, hjust = 1),
+    axis.ticks.x = element_blank(),
+    legend.position = "right",
+    legend.key.size = unit(0.8, "line"))+
+  guides(fill = guide_legend(ncol = 1, byrow = TRUE))
+
+top_Family_plot
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/compositional_bar_family.svg", height = 8, width = 12)
+```
+
+##8.3 Combine plots
+```{r}
+comp_bar <- ggarrange(top_Family_plot, top_Genus_plot, nrow = 2, labels = c("C", "D"), font.label = list(color = "red", face = "bold"), heights = c(0.5, 0.55), align = "v")
+comp_bar
+
+comp_bar <- annotate_figure(comp_bar,
+  left = textGrob("Relative abundance", rot = 90, vjust = 1),
+  top = text_grob("Temporal changes to the microbiota profile", size = 15, color = "#0f4761", face = "bold"),
+  bottom = textGrob("Months")
+)
+
+comp_bar
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/compositional_bar_plot_longitudinal.svg", width = 17, height = 8)
+```
+
+#9 Differential abundance analysis
+#At the Family level
+##9.1 LinDA
+```{r}
+# load input data to run LinDA
+linda_Family <- as.data.frame(da_physeq_Family_dummy@otu_table)
+linda_metadata_Family <- data.frame(sample_data(da_physeq_Family_dummy)) %>%
+  dplyr::select(Individual, Donation, Time_diff)
+
+#########################################################################################################################################################
+# Run LinDA
+linda_da_Family <- MicrobiomeStat::linda(linda_Family, linda_metadata_Family,
+  formula = "~Time_diff+(1|Individual/Donation)", alpha = 0.05,
+  feature.dat.type = "count", p.adj.method = "BH", corr.cut = 0.05,
+  n.cores = 10, adaptive = "pseudo.cnt"
+)
+
+#########################################################################################################################################################
+# for sym vs asym
+# extract lfc and taxa name of those with p.adj value below 0.05
+linda_da_Family_time_diff <- linda_da_Family[["output"]][["Time_diff"]] %>%
+  filter(padj <= 0.05) %>%
+  rownames_to_column("Taxa")
+
+# write.csv(linda_da_Family_time_diff, "/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/Data/linda_sig_lfc_Family_time_diff_da_0.5_treshold.csv")
+
+dim(linda_da_Family_time_diff) # 4, 9
+```
+
+
+##9.2 NBZIMM 
+```{r}
+# generate input files for NBZIMM
+# standardzing otu table using relative abundance instead of hellinger
+nbz_counts_Family <- decostand(t(da_physeq_Family@otu_table), method = "total")
+nbz_metadata_Family <- data.frame(sample_data(da_physeq_Family))
+
+# standaridizing the numeric data from the metadata
+nbz_metadata_Family <- nbz_metadata_Family %>% mutate_if(is.numeric, decostand, method = "standardize", na.rm = TRUE)
+
+#########################################################################################################################################################
+
+# Run NBZIMM
+
+nbz_da_Family <- mms(
+  y = nbz_counts_Family,
+  fixed = ~Time_diff,
+  data = nbz_metadata_Family,
+  random = ~ 1 | Individual / Donation,
+  min.p = 0, # since already pre-filtered
+  method = "zinb",
+  zi_fixed = ~1, # zi_fixed = ~1: This means you are including only the intercept (no other fixed effects) in the zero-inflation part of the model.
+  zi_random = NULL
+) # zi_random = NULL: This means you are not including any random effects in the zero-inflation part of the model.. Togehther, they mean: only an intercept should be used for the fixed part of the zero-inflation, and no random effects should be incorporated into the zero-inflation component.
+
+#########################################################################################################################################################
+# extract output
+nbz_output_Family <- fixed(nbz_da_Family)$dist[fixed(nbz_da_Family)$dist[, 2] != "(Intercept)", ]
+nbz_da_Family_df_time_diff <- subset(nbz_output_Family, nbz_output_Family$padj < 0.05) # extracting those with a p-adjsuted value of less than 0.05
+
+# write.csv(nbz_da_Family_df_time_diff, "/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/Data/nbzimm_da_Family_sig_time_diff_da_0.5_treshold.csv")
+
+# dimensions of sig DA Family
+dim(nbz_da_Family_df_time_diff) # 9   6
+```
+
+
+##9.3 DA Family intersection
+```{r}
+#########################################################################################################################################################
+# create input for lfc plot
+
+# input to join DA dataframes
+linda_da_Family_time_diff <- linda_da_Family_time_diff %>%
+  mutate(Tool = "LinDA") %>%
+  dplyr::rename(l2fc = log2FoldChange) %>%
+  dplyr::select(Taxa, l2fc, Tool)
+
+nbz_da_Family_df_time_diff <- nbz_da_Family_df_time_diff %>%
+  mutate(Tool = "NBZIMM") %>%
+  mutate(l2fc = log2(exp(Estimate))) %>% # convert estimate of coefficient to log2foldchange
+  dplyr::rename(Taxa = responses) %>%
+  dplyr::select(Taxa, l2fc, Tool)
+
+
+# merge
+all_da_Family <- bind_rows(linda_da_Family_time_diff, nbz_da_Family_df_time_diff) %>%
+  pivot_wider(names_from = Tool, values_from = l2fc) %>%
+  mutate(
+    Consensus = rowSums(!is.na(across(c(LinDA, NBZIMM)))) # Count number of tools that agree a feature is DA
+  ) %>%
+  filter(Consensus %in% c(2)) %>% # only keep features whre more than 2 tools agree
+  mutate(Taxa = factor(Taxa)) %>%
+  mutate(Average_lfc = rowMeans(dplyr::select(., c(LinDA, NBZIMM)), na.rm = TRUE)) %>%
+  mutate(Average_lfc = signif(Average_lfc, 2)) %>% # round
+  mutate(Family = Taxa) %>%
+  mutate(Lineage = Taxa) %>%
+  mutate(Rank = "Family")
+
+dim(all_da_Family) # 1
+```
+
+#At the Genus level
+##9.4 LinDA
+```{r}
+# load input data to run LinDA
+linda_Genus <- as.data.frame(da_physeq_Genus_dummy@otu_table)
+linda_metadata_Genus <- data.frame(sample_data(da_physeq_Genus_dummy)) %>%
+  dplyr::select(Individual, Donation, Time_diff)
+
+#########################################################################################################################################################
+# Run LinDA
+linda_da_Genus <- MicrobiomeStat::linda(linda_Genus, linda_metadata_Genus,
+  formula = "~Time_diff+(1|Individual/Donation)", alpha = 0.05,
+  feature.dat.type = "count", p.adj.method = "BH", corr.cut = 0.05,
+  n.cores = 10, adaptive = "pseudo.cnt"
+)
+
+#########################################################################################################################################################
+# for sym vs asym
+# extract lfc and taxa name of those with p.adj value below 0.05
+linda_da_Genus_time_diff <- linda_da_Genus[["output"]][["Time_diff"]] %>%
+  filter(padj <= 0.05) %>%
+  rownames_to_column("Taxa")
+
+# write.csv(linda_da_Genus_time_diff, "/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/Data/linda_sig_lfc_Genus_time_diff_da_0.5_treshold.csv")
+
+dim(linda_da_Genus_time_diff) # 11, 9
+```
+
+##9.5 NBZIMM 
+```{r}
+# generate input files for NBZIMM
+# standardzing otu table using relative abundance instead of hellinger
+nbz_counts_Genus <- decostand(t(da_physeq_Genus@otu_table), method = "total")
+nbz_metadata_Genus <- data.frame(sample_data(da_physeq_Genus))
+
+# standaridizing the numeric data from the metadata
+nbz_metadata_Genus <- nbz_metadata_Genus %>% mutate_if(is.numeric, decostand, method = "standardize", na.rm = TRUE)
+
+#########################################################################################################################################################
+
+# Run NBZIMM
+
+nbz_da_Genus <- mms(
+  y = nbz_counts_Genus,
+  fixed = ~Time_diff,
+  data = nbz_metadata_Genus,
+  random = ~ 1 | Individual / Donation,
+  min.p = 0, # since already pre-filtered
+  method = "zinb",
+  zi_fixed = ~1, 
+  zi_random = NULL
+)
+
+#########################################################################################################################################################
+# extract output
+nbz_output_Genus <- fixed(nbz_da_Genus)$dist[fixed(nbz_da_Genus)$dist[, 2] != "(Intercept)", ]
+nbz_da_Genus_df_time_diff <- subset(nbz_output_Genus, nbz_output_Genus$padj < 0.05) # extracting those with a p-adjsuted value of less than 0.05
+
+# write.csv(nbz_da_Genus_df_time_diff, "/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/Data/nbzimm_da_Genus_sig_time_diff_da_0.5_treshold.csv")
+
+# dimensions of sig DA Genus
+dim(nbz_da_Genus_df_time_diff) # 25   6
+```
+
+##9.6 DA Genus intersection
+```{r}
+#########################################################################################################################################################
+# create input for lfc plot
+
+Genus_tax_asign <- data.frame(tax_table(da_physeq_Genus)) %>%
+  dplyr::select(Family, Genus)
+
+# input to join DA dataframes
+linda_da_Genus_time_diff <- linda_da_Genus_time_diff %>%
+  mutate(Tool = "LinDA") %>%
+  dplyr::rename(l2fc = log2FoldChange) %>%
+  dplyr::select(Taxa, l2fc, Tool)
+
+nbz_da_Genus_df_time_diff <- nbz_da_Genus_df_time_diff %>%
+  mutate(Tool = "NBZIMM") %>%
+  mutate(l2fc = log2(exp(Estimate))) %>% 
+  dplyr::rename(Taxa = responses) %>%
+  dplyr::select(Taxa, l2fc, Tool)
+
+# merge
+all_da_Genus <- bind_rows(linda_da_Genus_time_diff, nbz_da_Genus_df_time_diff) %>%
+  pivot_wider(names_from = Tool, values_from = l2fc) %>%
+  mutate(
+    Consensus = rowSums(!is.na(across(c(LinDA, NBZIMM)))) 
+  ) %>%
+  filter(Consensus %in% c(2)) %>% 
+  mutate(Taxa = factor(Taxa)) %>%
+  mutate(Average_lfc = rowMeans(dplyr::select(., c(LinDA, NBZIMM)), na.rm = TRUE)) %>%
+  mutate(Average_lfc = signif(Average_lfc, 2)) %>% 
+  left_join(Genus_tax_asign, by = c("Taxa" = "Genus")) %>%
+  mutate(Lineage = str_c(Family, ", ", Taxa)) %>%
+  mutate(Rank = "Genus")
+
+dim(all_da_Genus) # 6  8
+```
+
+#At the Species level
+##9.7 LinDA
+```{r}
+# load input data to run LinDA
+linda_Species <- as.data.frame(da_physeq_Species_dummy@otu_table)
+linda_metadata_Species <- data.frame(sample_data(da_physeq_Species_dummy)) %>%
+  dplyr::select(Individual, Donation, Time_diff)
+
+#########################################################################################################################################################
+# Run LinDA
+linda_da_Species <- MicrobiomeStat::linda(linda_Species, linda_metadata_Species,
+  formula = "~Time_diff+(1|Individual/Donation)", alpha = 0.05,
+  feature.dat.type = "count", p.adj.method = "BH", corr.cut = 0.05,
+  n.cores = 10, adaptive = "pseudo.cnt"
+)
+
+#########################################################################################################################################################
+# for sym vs asym
+# extract lfc and taxa name of those with p.adj value below 0.05
+linda_da_Species_time_diff <- linda_da_Species[["output"]][["Time_diff"]] %>%
+  filter(padj <= 0.05) %>%
+  rownames_to_column("Taxa")
+
+# write.csv(linda_da_Species_time_diff, "/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/Data/linda_sig_lfc_Species_time_diff_da_0.5_treshold.csv")
+
+dim(linda_da_Species_time_diff) # 12, 9
+```
+
+
+##9.8 NBZIMM 
+```{r}
+# generate input files for NBZIMM
+# standardzing otu table using relative abundance instead of hellinger
+nbz_counts_Species <- decostand(t(da_physeq_Species@otu_table), method = "total")
+# taxonomy <- data.frame(filter_da_Species@tax_table)
+nbz_metadata_Species <- data.frame(sample_data(da_physeq_Species))
+
+# standaridizing the numeric data from the metadata
+nbz_metadata_Species <- nbz_metadata_Species %>% mutate_if(is.numeric, decostand, method = "standardize", na.rm = TRUE)
+
+#########################################################################################################################################################
+
+# Run NBZIMM
+
+nbz_da_Species <- mms(
+  y = nbz_counts_Species,
+  fixed = ~Time_diff,
+  data = nbz_metadata_Species,
+  random = ~ 1 | Individual / Donation,
+  min.p = 0, # since already pre-filtered
+  method = "zinb",
+  zi_fixed = ~1, 
+  zi_random = NULL
+) 
+
+#########################################################################################################################################################
+# extract output
+nbz_output_Species <- fixed(nbz_da_Species)$dist[fixed(nbz_da_Species)$dist[, 2] != "(Intercept)", ]
+nbz_da_Species_df_time_diff <- subset(nbz_output_Species, nbz_output_Species$padj < 0.05) # extracting those with a p-adjsuted value of less than 0.05
+
+# write.csv(nbz_da_Species_df_time_diff, "/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/Data/nbzimm_da_Species_sig_time_diff_da_0.5_treshold.csv")
+
+# dimensions of sig DA Species
+dim(nbz_da_Species_df_time_diff) # 56   6
+```
+
+##9.9 DA Species intersection
+```{r}
+#########################################################################################################################################################
+# create input for lfc plot
+
+Species_tax_asign <- data.frame(tax_table(da_physeq_Species)) %>%
+  dplyr::select(Family, Species)
+
+# input to join DA dataframes
+linda_da_Species_time_diff <- linda_da_Species_time_diff %>%
+  mutate(Tool = "LinDA") %>%
+  dplyr::rename(l2fc = log2FoldChange) %>%
+  dplyr::select(Taxa, l2fc, Tool)
+
+nbz_da_Species_df_time_diff <- nbz_da_Species_df_time_diff %>%
+  mutate(Tool = "NBZIMM") %>%
+  mutate(l2fc = log2(exp(Estimate))) %>% 
+  dplyr::rename(Taxa = responses) %>%
+  dplyr::select(Taxa, l2fc, Tool)
+
+# merge
+all_da_Species <- bind_rows(linda_da_Species_time_diff, nbz_da_Species_df_time_diff) %>%
+  pivot_wider(names_from = Tool, values_from = l2fc) %>%
+  mutate(
+    Consensus = rowSums(!is.na(across(c(LinDA, NBZIMM)))) 
+  ) %>%
+  filter(Consensus %in% c(2)) %>% 
+  mutate(Taxa = factor(Taxa)) %>%
+  mutate(Average_lfc = rowMeans(dplyr::select(., c(LinDA, NBZIMM)), na.rm = TRUE)) %>%
+  mutate(Average_lfc = signif(Average_lfc, 2)) %>% 
+  left_join(Species_tax_asign, by = c("Taxa" = "Species")) %>%
+  mutate(Lineage = str_c(Family, ", ", Taxa)) %>%
+  mutate(Rank = "Species")
+
+dim(all_da_Species) # 7   8
+```
+
+##9.9 Combine DA plots
+```{r}
+all_da_ranks <- bind_rows(all_da_Family, all_da_Genus, all_da_Species) %>%
+  mutate(NBZIMM = signif(NBZIMM, 2)) # round
+
+table(all_da_ranks$Rank)
+unique(all_da_ranks$Family)
+
+# "Bifidobacteriaceae"    "Lachnospiraceae"       "Mogibacterium_f"       "Peptostreptococcaceae" "Bacteroidaceae"        "Rikenellaceae"         "Ruminococcaceae"
+
+# Family_taxa_color
+#  Bacteroidaceae      Muribaculaceae  Porphyromonadaceae      Prevotellaceae Christensenellaceae     Lachnospiraceae     Ruminococcaceae  Acidaminococcaceae     Veillonellaceae
+#       "#A6CEE3"           "#1F78B4"           "#B2DF8A"           "#33A02C"           "#FB9A99"           "#E31A1C"           "#FDBF6F"           "#FF7F00"           "#CAB2D6"
+# Akkermansiaceae                <NA>                <NA>               Other
+#       "#6A3D9A"           "#FFFF99"           "#B15928"              "grey"
+
+#########################################################################################################################################################
+# plot
+
+all_da_ranks_plot <- ggplot(data = all_da_ranks, aes(x = reorder(Taxa, -NBZIMM), y = Average_lfc, fill = Family)) +
+  scale_x_discrete(labels = function(x) {
+    stringr::str_wrap(x, width = 30)
+  }) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Differentially abundant taxa over time", y = "log2 fold change\n\n\n", x = "Taxa") +
+  facet_grid(~Rank, scales = "free", space = "free") +
+  theme_bw(base_size = 12) +
+  scale_fill_manual(values = c("Ruminococcaceae" = "#FDBF6F", "Lachnospiraceae" = "#E31A1C", "Peptostreptococcaceae" = "#16537e", "Mogibacterium_f" = "#ffff7f", "Rikenellaceae" = "#87264b", "Bifidobacteriaceae" = "#ada295", "Bacteroidaceae" = "#A6CEE3")) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+  geom_text(aes(label = NBZIMM),
+    position = position_dodge(width = 0.9),
+    size = 3,
+    vjust = 0.5, 
+    hjust = 0.5
+  ) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "right",
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    plot.margin = margin(10, 10, 10, 30),
+    legend.spacing.x = unit(5, "cm")
+  )
+
+all_da_ranks_plot
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/da_all_ranks_da_0.5_treshold.svg", height = 5.5,width = 10)
+```
+
+##9.10 DA abundance heatmap
+```{r}
+da_Family_list <- all_da_ranks %>%
+  filter(Rank == "Family") %>%
+  pull(Taxa)
+
+da_Genus_list <- all_da_ranks %>%
+  filter(Rank == "Genus") %>%
+  pull(Taxa)
+
+da_Species_list <- all_da_ranks %>%
+  filter(Rank == "Species") %>%
+  pull(Taxa)
+
+da_Family_otu_rel <- data.frame(otu_table(da_physeq_Family_rel)) %>%
+  rownames_to_column("rowname") %>% # Convert row names to a column
+  filter(rowname %in% da_Family_list) %>% # Filter rows based on Family_list
+  column_to_rownames("rowname")
+
+da_Genus_otu_rel <- data.frame(otu_table(da_physeq_Genus_rel)) %>%
+  rownames_to_column("rowname") %>% # Convert row names to a column
+  filter(rowname %in% da_Genus_list) %>% # Filter rows based on Genus_list
+  column_to_rownames("rowname")
+
+da_Species_otu_rel <- data.frame(otu_table(da_physeq_Species_rel)) %>%
+  rownames_to_column("rowname") %>% # Convert row names to a column
+  filter(rowname %in% da_Species_list) %>% # Filter rows based on Species_list
+  column_to_rownames("rowname")
+
+all_da_otu_rel <- bind_rows(da_Family_otu_rel, da_Genus_otu_rel, da_Species_otu_rel) %>%
+  as.matrix()
+
+# make the column annotations
+da_metadata <- metadata %>%
+  mutate(Timepoint = factor(Timepoint, levels = c("T00", "T01", "T02", "T03", "T04"))) %>%
+  dplyr::select(sample_label, Timepoint, Individual, Donation) %>%
+  mutate(sample_label = as.character(sample_label))
+
+
+# make column splits and annotations
+column_split <- factor(da_metadata$Donation, levels = c("D0503", "D0601", "D0603", "D1007", "D1008", "D1009", "D1011", "D1013", "D1101", "D1102", "D1105", "D1109"))
+
+# make bar annotation of the l2fc values
+l2fc_anno <- all_da_ranks %>%
+  dplyr::select(Taxa, Family, Rank, NBZIMM) %>%
+  arrange(match(Taxa, rownames(all_da_otu_rel))) %>% # rearrange row by heatmap order
+  mutate(l2fc_sig = case_when(
+    NBZIMM >= 0 ~ "green",
+    NBZIMM <= 0 ~ "red"
+  ))
+
+l2fc_bar_color <- l2fc_anno %>% pull(l2fc_sig)
+
+# color palette
+metacyc_color <- colorRamp2::colorRamp2(c(0, 0.08), c("#e0e0e0", "#8e6b71"))
+
+# make row annotation
+row_anno <- rowAnnotation(
+  `NBZIMM l2fc` = anno_numeric(
+    matrix(l2fc_anno$NBZIMM), # Ensure the matrix is correctly formatted
+    bg_gp = gpar(fill = l2fc_bar_color, col = "white"),
+    bar_width = unit(1, "npc"), # width of the lfc bars
+    width = unit(1, "cm"), # width on the heatmap
+    labels_gp = gpar(fontsize = 4) # Adjust font size for the values
+  ),
+  Family = as.character(l2fc_anno$Family),
+  col = list(
+    Family = c(
+      "Ruminococcaceae" = "#FDBF6F",
+      "Lachnospiraceae" = "#E31A1C",
+      "Peptostreptococcaceae" = "#16537e",
+      "Mogibacterium_f" = "#ffff7f",
+      "Rikenellaceae" = "#87264b",
+      "Bifidobacteriaceae" = "#ada295",
+      "Bacteroidaceae" = "#A6CEE3"
+    )
+  ),
+  annotation_name_gp = gpar(fontsize = 5), # Adjust font size for the annotation name
+  annotation_legend_param = list(
+    Family = list(
+      direction = "horizontal",
+      title_gp = gpar(fontsize = 5, fontface = "bold"), # Adjust title font size
+      labels_gp = gpar(fontsize = 4), # Adjust labels font size
+      grid_height = unit(0.3, "cm"), # Adjust legend item size
+      grid_width = unit(0.3, "cm") # Adjust legend item size
+    )
+  )
+)
+
+# make row order by average_l2fc difference
+row_order_list <- all_da_ranks %>%
+  arrange(Rank, -NBZIMM) %>%
+  pull(Taxa)
+
+# make column annotation
+bottom_anno <- HeatmapAnnotation(
+  Timepoint = as.character(da_metadata$Timepoint),
+  col = list(
+    Timepoint = c("T00" = "#bb7c3c", "T01" = "#f06d36", "T02" = "#009874", "T03" = "#003d63", "T04" = "#440439")
+  ),
+  annotation_name_side = "left", # Set annotation name side
+  annotation_name_gp = gpar(fontsize = 5), # Adjust font size for annotation name
+  annotation_legend_param = list(
+    Timepoint = list(
+      direction = "horizontal", # Set legend direction
+      title_gp = gpar(fontsize = 5, fontface = "bold"), # Adjust title font size
+      labels_gp = gpar(fontsize = 4), # Adjust labels font size
+      grid_height = unit(0.3, "cm"), # Adjust legend item size
+      grid_width = unit(0.3, "cm") # Adjust legend item size
+    )
+  )
+)
+
+# top annotation
+top_anno <- HeatmapAnnotation(
+  empty = anno_empty(border = FALSE, height = unit(8, "mm")), # set an empty block anno for individual level
+  individual = anno_block(
+    gp = gpar(fill = rep(c("#198687", "#f93d91", "#f93d91", "#9430b5", "#9430b5", "#9430b5", "#9430b5", "#9430b5", "#56a2fd", "#56a2fd", "#56a2fd", "#56a2fd")), col = "black"),
+    labels = rep(c("D0501", "D0601", "D0603", "D1007", "D1008", "D10019", "D1010", "D1012", "D1101", "D1102", "D1105", "D1108"), each = 1),
+    labels_gp = gpar(col = "black", fontsize = 5),
+    height = unit(0.25, "cm")
+  )
+)
+
+# make the annoblock function to split each donor:
+library(GetoptLong) # for the function qq()
+group_block_anno <- function(
+    group, empty_anno, gp = gpar(),
+    label = NULL, label_gp = gpar(fontsize = 5)) { # set the font size for the group block anno
+
+  seekViewport(qq("annotation_@{empty_anno}_@{min(group)}"))
+  loc1 <- deviceLoc(x = unit(0, "npc"), y = unit(0, "npc"))
+  seekViewport(qq("annotation_@{empty_anno}_@{max(group)}"))
+  loc2 <- deviceLoc(x = unit(1, "npc"), y = unit(0.5, "npc"))
+
+  seekViewport("global")
+  grid.rect(loc1$x, loc1$y,
+    width = loc2$x - loc1$x, height = loc2$y - loc1$y,
+    just = c("left", "bottom"), gp = gp
+  )
+  if (!is.null(label)) {
+    grid.text(label, x = (loc1$x + loc2$x) * 0.5, y = (loc1$y + loc2$y) * 0.5, gp = label_gp)
+  }
+}
+
+# svg("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/da_heatmap_abun_0.5_treshold.svg", height = 3, width = 8)
+
+da_heatmap <- ComplexHeatmap::Heatmap(all_da_otu_rel,
+  name = "Relative abundance",
+  cluster_columns = FALSE,
+  cluster_rows = FALSE,
+  cluster_row_slices = FALSE,
+  col = metacyc_color,
+  column_names_rot = 45,
+  column_title = "Change in the relative abundance of differentially abundant taxa over time",
+  column_title_gp = gpar(fontsize = 8, col = "#0f4761", fontface = "bold"), # Set column title font size and color
+  row_order = row_order_list,
+  column_order = sort(colnames(all_da_otu_rel)),
+  column_split = da_metadata$Donation,
+  row_split = l2fc_anno$Rank,
+  row_title_gp = gpar(fontsize = 4), # row split label size
+  right_annotation = row_anno,
+  top_annotation = top_anno,
+  bottom_annotation = bottom_anno,
+  row_names_max_width = unit(5, "cm"),
+  heatmap_legend_param = list(
+    direction = "horizontal", labels_gp = gpar(fontsize = 3.5), # changes the font size values of the "abundance"
+    title_gp = gpar(fontsize = 5, fontface = "bold")
+  ), # change the font size of the title of "abundance"
+  row_names_gp = grid::gpar(fontsize = 4), # row annotation name size
+  column_names_gp = grid::gpar(fontsize = 4) # y axis sample name size
+)
+
+da_heatmap_final <- draw(da_heatmap, merge_legends = TRUE, heatmap_legend_side = "right", annotation_legend_side = "right")
+
+# add the group block anno and convert compelxheatmap into a grob so we can add it to ggrarrange
+da_heatmap_final <- group_block_anno(1:1, "empty", gp = gpar(fill = "#198687"), label = "Donor 5")
+da_heatmap_final <- group_block_anno(2:3, "empty", gp = gpar(fill = "#f93d91"), label = "Donor 6")
+da_heatmap_final <- group_block_anno(4:8, "empty", gp = gpar(fill = "#9430b5"), label = "Donor 10")
+da_heatmap_final <- group_block_anno(9:12, "empty", gp = gpar(fill = "#56a2fd"), label = "Donor 11")
+
+dev.off()
+```
+
+##9.10 Combine DA + alpha + beta plots
+```{r}
+# add label for lfc plot
+all_da_ranks_plot <- ggarrange(all_da_ranks_plot, labels = c("F"), legend = "none", font.label = list(color = "red", face = "bold"))
+all_da_ranks_plot
+
+# Combine plots
+alpha_beta_lfc <- ggarrange(alpha_beta, NULL, all_da_ranks_plot, nrow = 3, heights = c(5, 0.25, 3), ncol = 1, legend = TRUE, common.legend = TRUE)
+alpha_beta_lfc
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/alpha_beta_lfc_long.svg", width = 12, height = 15)
+
+# import the DA complexheatmap svg on to R
+
+library(patchwork)
+library(magick)
+
+lala <- (
+  image_read_svg("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/da_heatmap_abun.svg") |> image_ggplot()
+)
+```
+
+#12. MVA
+##12.1 MVA Genus
+```{r}
+# generate input files to create own own phyloseq object
+# create count_table
+mva_Genus_otu <- data.frame(otu_table(physeq_Genus))
+mva_Genus_otu_stan <- decostand(mva_Genus_otu, method = "hellinger") # standardising with Hellinger
+mva_Genus_otu_stan_trans <- sqrt(mva_Genus_otu_stan) %>% # normalising
+  as.matrix()
+
+# create metadata
+mva_metadata <- read.csv("/home/localadmin/IMU/10_ETUDE_CLIN/MISTIC/Asterix_Obelix/ALGFMT/Analysis/Longitudinal_M24_FINAL/Metadata_longitudinal_M24.tsv", sep = "\t") %>%
+  column_to_rownames("Sample") %>%
+  mutate(Time_diff = as.numeric(Time_diff)) %>%
+  dplyr::mutate_if(is.numeric, vegan::decostand, method = "standardize", na.rm = TRUE) %>% # standardising numerical variables
+  mutate_if(~ !is.numeric(.), as.factor) %>% # everything tha tis not numeric becomes factor
+  dplyr::select(Donation, Timepoint, Time, Individual, Time_diff)
+
+# create taxnomic data
+mva_tax <- data.frame(tax_table(physeq_Genus)) %>% as.matrix()
+
+#########################################################################################################################################################
+
+# combine to create phyloseq object
+phyloseq_mva_otu_Genus <- otu_table(mva_Genus_otu_stan_trans, taxa_are_rows = TRUE)
+phyloseq_mva_tax_Genus <- tax_table(mva_tax)
+phyloseq_mva_meta <- sample_data(mva_metadata)
+
+physeq_Genus_mva <- phyloseq(phyloseq_mva_otu_Genus, phyloseq_mva_tax_Genus, phyloseq_mva_meta) # 318 samples
+physeq_Genus_mva <- microViz::ps_drop_incomplete(physeq_Genus_mva) # 72 samples, dropped one sample
+physeq_Genus_mva # 318 taxa
+sample_names(physeq_Genus_mva)
+sample_variables(physeq_Genus_mva)
+
+# setting the Donors as the reference level:
+sample_data(physeq_Genus_mva)$Timepoint <- factor(sample_data(physeq_Genus_mva)$Timepoint,
+  levels = c("T00", "T01", "T02", "T03", "T04")
+)
+```
+
+##12.2 MVA Species
+```{r}
+# generature input files to create own own phyloseq object
+
+# create count_table
+mva_Species_otu <- data.frame(otu_table(physeq_Species))
+mva_Species_otu_stan <- decostand(mva_Species_otu, method = "hellinger") # standardising with Hellinger
+mva_Species_otu_stan_trans <- sqrt(mva_Species_otu_stan) %>% # normalising
+  as.matrix()
+
+# create metadata
+mva_metadata <- read.csv("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Metadata_longitudinal_M24.tsv", sep = "\t") %>%
+  column_to_rownames("Sample") %>%
+  mutate(Time_diff = as.numeric(Time_diff)) %>%
+  dplyr::mutate_if(is.numeric, vegan::decostand, method = "standardize", na.rm = TRUE) %>% # standardising numerical variables
+  mutate_if(~ !is.numeric(.), as.factor) %>% # everything tha tis not numeric becomes factor
+  dplyr::select(Donation, Timepoint, Time, Individual, Time_diff)
+
+# create taxnomic data
+mva_tax <- data.frame(tax_table(physeq_Species)) %>% as.matrix()
+
+#########################################################################################################################################################
+
+# combine to create phyloseq object
+phyloseq_mva_otu_Species <- otu_table(mva_Species_otu_stan_trans, taxa_are_rows = TRUE)
+phyloseq_mva_tax_Species <- tax_table(mva_tax)
+phyloseq_mva_meta <- sample_data(mva_metadata)
+
+physeq_Species_mva <- phyloseq(phyloseq_mva_otu_Species, phyloseq_mva_tax_Species, phyloseq_mva_meta) # 883 samples
+physeq_Species_mva <- microViz::ps_drop_incomplete(physeq_Species_mva) # 72 samples, dropped one sample
+physeq_Species_mva # 883 taxa
+sample_names(physeq_Species_mva)
+sample_variables(physeq_Species_mva)
+
+# setting the Donors as the reference level:
+sample_data(physeq_Species_mva)$Timepoint <- factor(sample_data(physeq_Species_mva)$Timepoint,
+  levels = c("T00", "T01", "T02", "T03", "T04")
+)
+```
+
+
+##12.3 Bray-Curtis Genus
+```{r}
+## constrained ordination for bray curtis
+ord_Genus_mva_bray <- phyloseq::distance(physeq_Genus_mva, method = "bray", binary = FALSE) # CAP ordinate
+
+cap_ordination_bray_Genus <- ordinate(
+  physeq = physeq_Genus_mva,
+  method = "CAP",
+  distance = ord_Genus_mva_bray,
+  formula = ~ Individual / Donation
+)
+
+cap_ordination_bray_Genus
+
+#########################################################################################################################################################
+
+# calculate significance of model and variables
+set.seed(12345)
+anova.cca(cap_ordination_bray_Genus, step = 1000) # Model is significant: p = 0.001 ***
+
+set.seed(12345)
+anova.cca(cap_ordination_bray_Genus, by = "term", step = 1000) ## we test the impact of the environmental variable seperately.
+```
+
+
+##12.4 Bray-Curtis Species
+```{r}
+## constrained ordination for bray curtis
+ord_Species_mva_bray <- phyloseq::distance(physeq_Species_mva, method = "bray", binary = FALSE) # CAP ordinate
+
+cap_ordination_bray_Species <- ordinate(
+  physeq = physeq_Species_mva,
+  method = "CAP",
+  distance = ord_Species_mva_bray,
+  formula = ~ Individual / Donation
+)
+
+cap_ordination_bray_Species
+
+#########################################################################################################################################################
+
+# calculate significance of model and variables
+set.seed(12345)
+anova.cca(cap_ordination_bray_Species, step = 1000) # Model is significant: p = 0.001 ***
+
+set.seed(12345)
+anova.cca(cap_ordination_bray_Species, by = "term", step = 1000) ## we test the impact of the environmental variable seperately.
+```
+
+##12.5 Jaccard Genus
+```{r}
+## 12.2 Jaccard Genus
+ord_Genus_mva_jac <- phyloseq::distance(physeq_Genus_mva, method = "jaccard", binary = TRUE) # CAP ordinate
+
+cap_ordination_jac_Genus <- ordinate(
+  physeq = physeq_Genus_mva,
+  method = "CAP",
+  distance = ord_Genus_mva_jac,
+  formula = ~ Individual / Donation
+)
+
+cap_ordination_jac_Genus
+
+#########################################################################################################################################################
+
+# calculate significance of model and variables
+set.seed(12345)
+anova.cca(cap_ordination_jac_Genus, step = 1000) # Model is significant: p = 0.001 ***
+
+set.seed(12345)
+anova.cca(cap_ordination_jac_Genus, by = "term", step = 1000) ## we test the impact of the environmental variable seperately.
+```
+
+
+##12.6 Jaccard Species
+```{r}
+## 12.2 Jaccard Species
+ord_Species_mva_jac <- phyloseq::distance(physeq_Species_mva, method = "jaccard", binary = TRUE) # CAP ordinate
+
+cap_ordination_jac_Species <- ordinate(
+  physeq = physeq_Species_mva,
+  method = "CAP",
+  distance = ord_Species_mva_jac,
+  formula = ~ Individual / Donation
+)
+
+cap_ordination_jac_Species
+
+#########################################################################################################################################################
+
+# calculate significance of model and variables
+set.seed(12345)
+anova.cca(cap_ordination_jac_Species, step = 1000) # Model is significant: p = 0.001 ***
+
+set.seed(12345)
+anova.cca(cap_ordination_jac_Species, by = "term", step = 1000) ## we test the impact of the environmental variable seperately.
+
+mva_otu <- data.frame(t(otu_table(physeq_Species_mva)))
+mva_meta <- data.frame(sample_data(physeq_Species_mva))
+```
+
+
+##12.7 Plot MVA Genus
+```{r}
+# check which asix are explaining how mauch variation
+bray_scree <- plot_scree(cap_ordination_bray_Genus, "Scree Plot for MCs in Constrained Analysis of Principal Coordinates (CAPSCALE)")
+print(bray_scree)
+
+# CAPSCALE plot
+mva_bray_plot <- plot_ordination(
+  physeq = physeq_Genus_mva,
+  ordination = cap_ordination_bray_Genus,
+  color = "Individual",
+  shape = "Timepoint",
+  axes = c(1, 2)
+) +
+  theme_bw(base_size = 12) +
+  geom_point(aes(colour = Individual), size = 3) +
+  geom_point(size = 3) +
+  ggtitle("Multivaraite analysis at the Genus level based on Bray-Curtis distance") +
+  scale_color_manual(
+    values = c("Donor_05" = "#198687", "Donor_06" = "#f93d91", "Donor_10" = "#9430b5", "Donor_11" = "#56a2fd")
+  ) +
+  scale_shape_manual(values = c("T00" = 21, "T01" = 22, "T02" = 23, "T03" = 24, "T04" = 25)) +
+  scale_fill_manual(values = c("Donor_05" = "#198687", "Donor_06" = "#f93d91", "Donor_10" = "#9430b5", "Donor_11" = "#56a2fd"))
+
+mva_bray_plot
+
+
+# Now add the environmental variables as arrows
+mva_bray_arrow <- vegan::scores(cap_ordination_bray_Genus, display = "bp")
+
+# Add labels, make a data.frame
+mva_bray_arrow_df <- data.frame(labels = rownames(mva_bray_arrow), mva_bray_arrow)
+
+# Define the arrow aesthetic mapping
+bray_arrow_map <- aes(
+  xend = CAP1,
+  yend = CAP2,
+  x = 0, y = 0,
+  shape = NULL,
+  color = NULL,
+  label = labels
+)
+
+bray_label_map <- aes(
+  x = 1.3 * CAP1, y = 1.3 * CAP2, # multiplying the corrdinates by 1.3 so that the plot is easier to read
+  shape = NULL,
+  color = NULL,
+  label = labels
+)
+
+arrowhead <- arrow(length = unit(0.02, "npc"))
+
+## now plot the arrow
+mva_bray_plot <- mva_bray_plot + geom_segment(
+  mapping = bray_arrow_map, size = .7,
+  data = mva_bray_arrow_df, color = "grey",
+  arrow = arrowhead
+) +
+  geom_text(
+    mapping = bray_label_map, size = 2.5,
+    data = mva_bray_arrow_df,
+    show.legend = TRUE,
+    vjust = "inward", hjust = "inward"
+  )
+
+mva_bray_plot
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/mva_bray_genus.svg", height = 6, width = 8)
+```
+
+
+
+##12.8 Plot MVA Species
+```{r}
+# check which asix are explaining how mauch variation
+bray_scree <- plot_scree(cap_ordination_bray_Species, "Scree Plot for MCs in Constrained Analysis of Principal Coordinates (CAPSCALE)")
+print(bray_scree)
+
+# CAPSCALE plot
+mva_bray_plot <- plot_ordination(
+  physeq = physeq_Species_mva,
+  ordination = cap_ordination_bray_Species,
+  color = "Individual",
+  shape = "Timepoint",
+  axes = c(1, 2)
+) +
+  theme_bw(base_size = 12) +
+  geom_point(aes(colour = Individual), size = 3) +
+  geom_point(size = 3) +
+  # ggtitle("Multivaraite analysis at the Species level based on Bray-Curtis distance") +
+  scale_color_manual(
+    values = c("Donor_05" = "#198687", "Donor_06" = "#f93d91", "Donor_10" = "#9430b5", "Donor_11" = "#56a2fd")
+  ) +
+  scale_shape_manual(values = c("T00" = 21, "T01" = 22, "T02" = 23, "T03" = 24, "T04" = 25)) +
+  scale_fill_manual(values = c("Donor_05" = "#198687", "Donor_06" = "#f93d91", "Donor_10" = "#9430b5", "Donor_11" = "#56a2fd"))
+
+mva_bray_plot
+
+
+# Now add the environmental variables as arrows
+mva_bray_arrow <- vegan::scores(cap_ordination_bray_Species, display = "bp")
+
+# Add labels, make a data.frame
+mva_bray_arrow_df <- data.frame(labels = rownames(mva_bray_arrow), mva_bray_arrow)
+
+# Define the arrow aesthetic mapping
+bray_arrow_map <- aes(
+  xend = CAP1,
+  yend = CAP2,
+  x = 0, y = 0,
+  shape = NULL,
+  color = NULL,
+  label = labels
+)
+
+bray_label_map <- aes(
+  x = 1.3 * CAP1, y = 1.3 * CAP2, # multiplying the corrdinates by 1.3 so that the plot is easier to read
+  shape = NULL,
+  color = NULL,
+  label = labels
+)
+
+arrowhead <- arrow(length = unit(0.02, "npc"))
+
+## now plot the arrow
+mva_bray_plot <- mva_bray_plot + geom_segment(
+  mapping = bray_arrow_map, size = .7,
+  data = mva_bray_arrow_df, color = "grey",
+  arrow = arrowhead
+) +
+  geom_text(
+    mapping = bray_label_map, size = 2,
+    data = mva_bray_arrow_df,
+    show.legend = TRUE,
+    vjust = "inward", hjust = "inward"
+  )
+
+mva_bray_plot
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/mva_bray_species.svg", height = 6, width = 8)
+```
+
+##9.10 Combine alpha +mva
+```{r}
+# add label for lfc plot
+mva_bray_plot_label <- ggarrange(NULL, mva_bray_plot, NULL, labels = c("E"), nrow = 3, heights = c(0.15, 1.2, 0.15), legend = "none", font.label = list(color = "red", face = "bold"))
+mva_bray_plot_label
+
+
+mva_bray_plot_label <- annotate_figure(mva_bray_plot_label,
+  top = text_grob("Multivariate analysis at the species \nlevel based on Bray-Curtis distance", size = 15, color = "#0f4761", face = "bold")
+)
+
+mva_bray_plot_label
+
+# Combine plots
+alpha_mva <- ggarrange(alpha_plot_date, NULL, mva_bray_plot_label, ncol = 3, widths = c(5, 0.25, 3.5), legend = TRUE, common.legend = TRUE, align = "hv")
+alpha_mva
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Longitudinal_M24_FINAL/Visualisation/alpha_mva_wide.svg", width = 14, height = 8)
+```
+
+#END

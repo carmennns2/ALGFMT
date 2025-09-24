@@ -1,0 +1,1641 @@
+---
+title: "ALGFMT_M24_Longitudinal_FINAL"
+author: "Carmen"
+date: '2024-10-08'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set( # when makes rmd file, two files are created (rmd and html) - when finish with analysis, to show code, knit to html, word, or pdf. gives you file with code and figures (like a journal) - this prevents messages and warnings to show up in final document, only errors will appear
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+#1. Load
+##1.1. Packages
+```{r libaries, message=FALSE, warning=FALSE, include=FALSE}
+# set working directory
+setwd("/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/")
+
+# can add libraries that we need to use
+library(knitr)
+library(ggplot2)
+library(vegan)
+library(DT)
+library(data.table)
+library(dplyr)
+library(RColorBrewer)
+library(plyr)
+library(reshape2)
+library(stringr)
+library(kableExtra)
+library(phyloseq)
+library(tidyr)
+library(DT)
+library(ggpubr)
+library(microbiomeutilities) # interferes with fantaxtic
+library(phylosmith)
+library(ggrepel)
+library(ggh4x)
+library(gridExtra)
+library(lmerTest)
+library(performance)
+library(grid)
+library(metagMisc)
+library(dendextend)
+library(grDevices)
+library(Maaslin2)
+library(microbiome)
+library(knitr)
+library(fantaxtic)
+library(ANCOMBC)
+library(microbiome)
+library(tidyverse)
+library(DESeq2)
+library(VennDiagram)
+library(fuzzyjoin)
+library(BiodiversityR)
+library(ICC)
+library(dendextend)
+library(pvclust)
+library("graphics")
+library(pairwiseAdonis)
+library(ggpattern)
+library(patchwork)
+```
+
+##1.2. Data
+```{r}
+# load non-rarefied data
+physeq_no_raref <- readRDS("/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/DADA2/4_physeq/RDP_ezbiocloud/Bacteria_in_Kingdom/norarefaction/no_collapse/base_with_tree.rds") #   2332 asvs
+
+physeq_no_raref <- phylosmith::set_sample_order(phyloseq_obj = physeq_no_raref, sort_on = "sample_label")
+
+# check metadata to make sure everything is correct
+metadata <- data.frame(sample_data(physeq_no_raref))
+
+#########################################################################################################################################################
+# rarefry
+
+physeq <- rarefy_even_depth(physeq_no_raref, rngseed = 12345) # 2222 asvs
+
+# remove rare taxa (by converting singletons and doubletons to 0)
+otu_table(physeq)[otu_table(physeq) <= 2] <- 0
+
+# remove the alpha diversity index the came with the pipeline
+sample_data(physeq) <- sample_data(physeq)[, 1:(ncol(sample_data(physeq)) - 11)] # removes the last 11 columsn, which include the alpha diverseity measures computer by zAMP and R1 and R2 paths, which  I will not use as it is rareified. I will take the non-rarefied data then rarefy it myself.
+
+# create dataframes for easier analysis
+metadata <- data.frame(sample_data(physeq))
+count_table <- data.frame(otu_table(physeq))
+tax_table <- data.frame(phyloseq::tax_table(physeq))
+
+# count frequency for demographic information
+table(metadata$Sample_label_short)
+table(metadata$Individual, metadata$Sample_label_short)
+table(metadata$Individual, metadata$Formulation)
+length(unique(metadata$Sample_label_short))
+length(unique(metadata$sample_label))
+
+# get the average rarefied depth
+print(mean(colSums(as.data.frame(count_table)))) # 140974
+
+# make color palette
+mycolors <- c(brewer.pal(name = "Pastel1", n = 9), brewer.pal(name = "Set3", n = 12), brewer.pal(name = "Spectral", n = 11))
+
+#########################################################################################################################################################
+# calculate alpha diversity index:
+
+# Calculate the alpha diversity index
+set.seed(12345)
+alpha_indexes <- as.data.frame(MicrobiotaProcess::get_alphaindex(physeq)) %>%
+  mutate(Formulation = factor(Formulation, levels = c("Alginate", "Capsule", "Fresh"))) %>%
+  mutate(Individual = factor(Individual, levels = c("Donor_05", "Donor_06", "Donor_10", "Donor_11")))
+
+#########################################################################################################################################################
+# aggregate physeq to different taxonomic ranks:
+
+physeq_Species <- microbiome::aggregate_taxa(physeq, "Species") # 869 species
+physeq_Genus <- microbiome::aggregate_taxa(physeq, "Genus") # 313 genera
+physeq_Family <- microbiome::aggregate_taxa(physeq, "Family") # 62 families
+
+#########################################################################################################################################################
+# filter rare taxa for differential abundance analysis
+
+# only keeping taxas that are present in at least 10% of taxas and in 10% reads, to remove rare taxas
+da_physeq <- metagMisc::phyloseq_filter_prevalence(physeq = physeq, prev.trh = 0.10, abund.trh = 0.10, threshold_condition = "AND") # 1019 asvs
+
+# aggregate to different taxonomic ranks
+da_physeq_Species <- microbiome::aggregate_taxa(da_physeq, "Species") # 596 species
+da_physeq_Species_dummy <- microbiome::aggregate_taxa(da_physeq, "Species") # make a dummy for Maaslin
+otu_table(da_physeq_Species_dummy)[otu_table(da_physeq_Species_dummy) == 0] <- 1 ## convert 0 to 1.00001 for dummy variable for differential abundance analysis
+
+da_physeq_Genus <- microbiome::aggregate_taxa(da_physeq, "Genus") # 223 genera
+da_physeq_Genus_dummy <- microbiome::aggregate_taxa(da_physeq, "Genus") # make a dummy for Maaslin
+otu_table(da_physeq_Genus_dummy)[otu_table(da_physeq_Genus_dummy) == 0] <- 1 ## convert 0 to 1.00001 for dummy variable for differential abundance analysis
+
+da_physeq_Family <- microbiome::aggregate_taxa(da_physeq, "Family") # 43 families
+da_physeq_Family_dummy <- microbiome::aggregate_taxa(da_physeq, "Family") # make a dummy for Maaslin
+otu_table(da_physeq_Family_dummy)[otu_table(da_physeq_Family_dummy) == 0] <- 1 ## convert 0 to 1.00001 for dummy variable for differential abundance analysis
+
+
+#########################################################################################################################################################
+# convert to relative abundance for differential abundance heatmap plotting
+# aggregate to different taxonomic ranks
+da_physeq_Species_rel <- microbiome::transform(da_physeq_Species, "compositional")
+da_physeq_Genus_rel <- microbiome::transform(da_physeq_Genus, "compositional")
+da_physeq_Family_rel <- microbiome::transform(da_physeq_Family, "compositional")
+```
+
+
+#2. Quality control
+##1.1 Library quantification
+```{r DNA_yield, echo=FALSE, fig.height=7, message=FALSE, warning=FALSE, paged.print=TRUE}
+# load data
+sample_label <- rownames(metadata)
+metadata$sample_label <- sample_label
+
+
+metadata <- metadata %>%
+  mutate(Formulation = factor(Formulation, levels = c("Alginate", "Capsule", "Fresh")))
+
+#########################################################################################################################################################
+## plot DNA yield
+
+dna_quant <- ggplot(metadata, aes_string(x = "Sample_label_short", y = "Quantification", fill = "Formulation")) +
+  geom_col(alpha = 0.75) +
+  labs(x = NULL, y = "Quantification [nM]", title = "Library quantification") +
+  scale_fill_manual(values = c("Alginate" = "#66C2A5", "Capsule" = "#FC8D62", "Fresh" = "#8DA0CB")) +
+  theme_bw(base_size = 12) +
+  facet_nested(~Formulation, scales = "free", space = "free_x") +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "right",
+    legend.direction = "vertical"
+  ) +
+  guides(
+    colour = guide_legend(nrow = 1),
+    fill = guide_legend(title = "Individual")
+  )
+
+dna_quant
+```
+
+
+##1.2 Filtered reads 
+```{r Reads_yield, echo=FALSE, fig.height=7, fig.width=8, message=FALSE, warning=FALSE, paged.print=TRUE}
+# Load data with the number of filtered and maintained reads obtained from zAMP pipeline
+filtered_maintained_reads <- read.csv(file = "/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/DADA2/5_visualization/RDP_ezbiocloud/reads/raw_to_filtered_reads_stats.tsv", sep = "\t", header = TRUE, row.names = 1) %>%
+  mutate(Formulation = factor(Formulation, levels = c("Alginate", "Capsule", "Fresh"))) %>%
+  mutate(Reads = factor(Reads, levels = c("Tax filtered reads", "Reads processing", "Maintained reads"))) %>%
+  mutate(Count = as.numeric(Count))
+
+#########################################################################################################################################################
+### Plot overall reads
+
+overall_reads <- ggplot(filtered_maintained_reads, aes_string(x = "Sample_label_short", y = "Count", fill = "Reads")) +
+  geom_col() +
+  scale_fill_manual(values = c("Tax filtered reads" = "#8DD3C7", "Reads processing" = "#80B1D3", "Maintained reads" = "#D9D9D9")) +
+  labs(x = "Sample", y = "Reads", title = "Overall reads") +
+  facet_nested(~Formulation, scales = "free", space = "free_x") +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)
+  )
+
+overall_reads
+```
+
+
+
+##1.3 Rarefaction curve
+```{r}
+# plot rarefaction curve
+set.seed(12345)
+rcurve <- ranacapa::ggrare(physeq_no_raref, step = 1000, color = "Formulation", label = "sample_label", se = FALSE) +
+  labs(title = "Rarefaction curve", x = "Depth (reads)", y = "Nonrarefied number of ASVs") +
+  theme_bw(base_size = 12) +
+  scale_color_manual(values = c("Alginate" = "#66C2A5", "Capsule" = "#FC8D62", "Fresh" = "#8DA0CB")) +
+  scale_x_continuous(expand = expansion(mult = c(0.05, 0.25)))
+
+rcurve
+```
+
+
+##1.4 Combine plots
+```{r}
+# combine dna quantity and overall reads plot
+qc <- ggarrange(dna_quant, overall_reads, nrow = 2, labels = c("A", "B"), align = c("v"), heights = c(0.8, 1), font.label = list(color = "red", face = "bold"))
+qc
+
+rcurve <- ggarrange(rcurve, labels = c("C"), font.label = list(color = "red", face = "bold"), legend = FALSE)
+rcurve
+
+# combine all QC plots together
+qc_rcurve <- ggarrange(qc, rcurve, ncol = 2, widths = c(1, 0.5))
+qc_rcurve
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/qc_rcurve.svg", width = 18, height = 6.5)
+```
+
+
+#3 Cohort demographic
+```{r}
+# create upset plot for patient demographic breakdown
+# create logical metadata
+upset_meta <- metadata %>%
+  select(Individual, Antibiotic, Disease) %>%
+  distinct(Individual, .keep_all = TRUE) %>%
+  pivot_wider(names_from = c(Disease), values_from = c(Disease)) %>%
+  mutate(across(3:5, ~ !is.na(.))) # convert columns 5-6 into logical
+
+# extract name of variables we are interested in (timepoint, in this case)
+variables <- colnames(upset_meta[, 3:5])
+
+# plot
+upset(
+  upset_meta,
+  variables,
+  name = "Distribution of samples",
+  base_annotations = list(
+    "Intersection size" = intersection_size(
+      counts = TRUE,
+      mapping = aes(fill = Antibiotic)
+    ) +
+      scale_fill_manual(values = c(
+        "Antibiotic" = "#444444",
+        "None" = "#bcbcbc"
+      )) +
+      theme_bw(base_size = 12) +
+      theme(
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()
+      )
+  ),
+  width_ratio = 0.4,
+  queries = list(
+    upset_query(set = "Campylobacter", fill = "#5a1874"),
+    upset_query(set = "Salmonella", fill = "#66c2a5"),
+    upset_query(set = "Shigella", fill = "#998100")
+  ),
+  set_sizes = upset_set_size() +
+    geom_text(aes(label = ..count..), stat = "count", hjust = 1.1, color = "black", size = 3) +
+    expand_limits(y = 15) +
+    theme(axis.text.x = element_text(angle = 90))
+)
+
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/cohort_demographic_distribution.svg", height = 4.5, width = 7)
+
+#########################################################################################################################################################
+
+
+# load the cohort data
+cohort_dem <- read.csv("/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Metadata_Run_19_longitudinal.tsv", sep = "\t") %>%
+  mutate(BMI = as.numeric(BMI)) %>%
+  mutate(Birth_year = as.numeric(Birth_year)) %>%
+  mutate(Age_2024 = 2024 - Birth_year) %>%
+  mutate(BMI_category = case_when(
+    BMI <= 18.5 ~ "Underweight",
+    BMI >= 18.6 & BMI <= 24.9 ~ "Normal",
+    BMI >= 25 & BMI <= 29.9 ~ "Overweight",
+    BMI >= 30 ~ "Obese",
+    TRUE ~ "Unknown"
+  )) %>%
+  mutate(BMI_category = factor(BMI_category, levels = c("Underweight", "Normal", "Overweight", "Obese", "Unknown"))) %>%
+  distinct(Individual, .keep_all = TRUE)
+
+#########################################################################################################################################################
+# Disease Timepoint
+participants <- length(unique(cohort_dem$Individual))
+
+table(cohort_dem$Timepoint) # frequency of each group
+table(cohort_dem$Disease)
+round((table(cohort_dem$Disease) / participants) * 100, 1) # proportion of each group
+sum(round((table(cohort_dem$Disease) / participants) * 100, 1)) # make sure = 100
+
+#########################################################################################################################################################
+# Age
+
+aggregate(cohort_dem$Age_2024, function(x) c(mean = mean(x), sd = sd(x)), by = list(cohort_dem$Disease)) # calculate standard deviation
+
+#########################################################################################################################################################
+# Sex
+
+table(cohort_dem$Sex, cohort_dem$Disease)
+round(prop.table(table(cohort_dem$Sex, cohort_dem$Disease), margin = 2) * 100, 1) # margin = 2 calculates proportions within each column (i.e., each Disease)
+
+#########################################################################################################################################################
+# BMI
+
+table(cohort_dem$BMI_category, cohort_dem$Disease)
+round(prop.table(table(cohort_dem$BMI_category, cohort_dem$Disease), margin = 2) * 100, 1)
+sum(round(prop.table(table(cohort_dem$BMI_category, cohort_dem$Disease), margin = 2) * 100, 1)) # make sure = 300
+aggregate(cohort_dem$BMI, function(x) c(mean = mean(x, na.rm = TRUE), sd = sd(x, na.rm = TRUE)), by = list(cohort_dem$Disease)) # calculate standard deviation
+
+#########################################################################################################################################################
+# Antibiotic drug
+
+table(cohort_dem$Antibiotic, cohort_dem$Disease)
+round(prop.table(table(cohort_dem$Antibiotic, cohort_dem$Disease), margin = 2) * 100, 1)
+
+table(cohort_dem$Drug, cohort_dem$Disease)
+round(prop.table(table(cohort_dem$Drug, cohort_dem$Disease), margin = 2) * 100, 1)
+sum(round(prop.table(table(cohort_dem$Drug, cohort_dem$Disease), margin = 2) * 100, 1)) # make sure = 100
+
+#########################################################################################################################################################
+# manually add all the stats to a .csv file
+
+# load the stats file
+demographic <- read.csv("/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/Data/demographic_table.csv") %>%
+  magrittr::set_colnames(c("", "Campylobacter", "Salmonella", "Shigella"))
+
+demo_table <- kbl(demographic,
+  caption = "Cohort demographic", align = "c", color = "black", bold = TRUE,
+  # table.attr = "style='width:70%;'",
+  format = "latex"
+) %>%
+  # kable_styling(latex_options="scale_down", font_size = 7) %>%
+  # kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+  pack_rows("Age", 2, 2, bold = TRUE) %>%
+  pack_rows("Sex", 3, 4, bold = TRUE) %>%
+  pack_rows("BMI", 5, 10, bold = TRUE) %>%
+  pack_rows("Diet", 11, 11, bold = TRUE) %>%
+  pack_rows("Antibiotic", 12, 20, bold = TRUE) %>%
+  column_spec(1, width = "1.5cm") %>%
+  column_spec(2, width = "3cm") %>%
+  column_spec(3, width = "3cm") %>%
+  column_spec(4, width = "3cm")
+
+# save as overleaf tbale
+save_kable(demo_table, file = "/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/cohort_demographic_table.tex")
+# save_kable(demo_table, file = "/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/cohort_demographic_table.png", zoom = 3)
+```
+
+
+
+#4 Alpha diversity
+##4.1 Status
+```{r}
+# make a list of comparisons for the stats
+alpha_comparisons <- microbiomeutilities::make_pairs(alpha_indexes$Formulation)
+
+#########################################################################################################################################################
+
+# statistical analysis using a linear mixed effects model ------------------------------------------------------------------------------------------------------------------
+# statstical analysis for Chao1 --------------------------------------------------------------------------------------------------------------------------------------------------
+alpha_chao <- lmer(Chao1 ~ Formulation + (1 | Individual), data = alpha_indexes) # introduces random variable with normal distribution, adding random value to each donor to try to explain variation. univariate analysis using sample type but takes into account that some samples come from same patient.
+anova(alpha_chao) # to get p value for our LME4 model - no sig pvalue
+summary(alpha_chao) # pvalues for each fixed effects
+
+# r2 conditional and marginal
+chao_perf <- model_performance(alpha_chao)
+
+### statstical analysis for Pielou ----------------------------------------------------------------------------------------------------------------------------------------------
+alpha_pie <- lmer(Pielou ~ Formulation + (1 | Individual), data = alpha_indexes)
+anova(alpha_pie)
+summary(alpha_pie)
+
+# r2 conditional and marginal
+pie_perf <- model_performance(alpha_pie)
+
+### statstical analysis for Shannon ----------------------------------------------------------------------------------------------------------------------------------------------
+alpha_shan <- lmer(Shannon ~ Formulation + (1 | Individual), data = alpha_indexes)
+anova(alpha_shan)
+summary(alpha_shan)
+
+# r2 conditional and marginal
+shan_perf <- model_performance(alpha_shan)
+
+### Manually add pvalues from LME to the plots--------------------------------------------------------------------------------------------------------------------------------------------
+# chao_r2_formulation <- signif(chao_perf[["R2_conditional"]], digits = 3)
+# shan_r2_formulation <- signif(shan_perf[["R2_conditional"]], digits = 3)
+
+# chao_formulation <- signif(anova(alpha_chao)$"Pr(>F)", digits = 3)
+chao_alg_cap <- signif(summary(alpha_chao)[["coefficients"]]["FormulationCapsule", "Pr(>|t|)"], digits = 2)
+chao_alg_fresh <- signif(summary(alpha_chao)[["coefficients"]]["FormulationFresh", "Pr(>|t|)"], digits = 2)
+
+chao_values <- tibble::tribble(
+  ~group1, ~group2, ~p.adj, ~y.position,
+  "Alginate", "Capsule", chao_alg_cap, 575, # set where the eaves go on the y position
+  "Alginate", "Fresh", chao_alg_fresh, 620
+)
+
+# pie_formulation <- signif(anova(alpha_chao)$"Pr(>F)", digits = 3)
+pie_alg_cap <- signif(summary(alpha_pie)[["coefficients"]]["FormulationCapsule", "Pr(>|t|)"], digits = 2)
+pie_alg_fresh <- signif(summary(alpha_pie)[["coefficients"]]["FormulationFresh", "Pr(>|t|)"], digits = 2)
+
+pie_values <- tibble::tribble(
+  ~group1, ~group2, ~p.adj, ~y.position,
+  "Alginate", "Capsule", pie_alg_cap, 0.85,
+  "Alginate", "Fresh", pie_alg_fresh, 0.88
+)
+
+# shan_formulation <- signif(anova(alpha_shannon)$"Pr(>F)", digits = 3)
+shan_alg_cap <- signif(summary(alpha_shannon)[["coefficients"]]["FormulationCapsule", "Pr(>|t|)"], digits = 2)
+shan_alg_fresh <- signif(summary(alpha_shannon)[["coefficients"]]["FormulationFresh", "Pr(>|t|)"], digits = 2)
+
+shan_values <- tibble::tribble(
+  ~group1, ~group2, ~p.adj, ~y.position,
+  "Alginate", "Capsule", shan_alg_cap, 5,
+  "Alginate", "Fresh", shan_alg_fresh, 5.2
+)
+
+
+
+### plot chao1 -------------------------------------------------------------------------------------------------------------------------------------------
+alpha_chao_plot <- ggplot(alpha_indexes, aes(x = Formulation, y = Chao1)) +
+  geom_boxplot(aes(fill = Formulation), alpha = 0.5, position = position_dodge(width = 0.75), outlier.shape = NA) +
+  geom_point(position = position_dodge(width = 0.75), aes(shape = Individual, color = Individual), size = 2) +
+  labs(title = "Chao1 index", x = NULL, y = NULL) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "vertical",
+    legend.title = element_blank(),
+    legend.spacing.y = unit(0, "pt"),
+    legend.margin = margin(t = 1, b = 1)
+  ) +
+  guides(
+    color = guide_legend(nrow = 1, bycol = TRUE, title = "Individual"),
+    shape = guide_legend(nrow = 1, bycol = TRUE, title = "Individual"),
+    fill = guide_legend(title = "Formulation")
+  ) +
+  scale_color_manual(values = c("Donor_05" = "#198384", "Donor_06" = "#ff3887", "Donor_10" = "#40007f", "Donor_11" = "#66ccfe")) +
+  scale_shape_manual(values = c("Donor_05" = 21, "Donor_06" = 22, "Donor_10" = 23, "Donor_11" = 24)) +
+  scale_fill_manual(values = c("Alginate" = "#66C2A5", "Capsule" = "#FC8D62", "Fresh" = "#8DA0CB")) +
+  stat_pvalue_manual(chao_values, label = "p.adj", tip.length = 0.02) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15)))
+
+
+### plot pielou -------------------------------------------------------------------------------------------------------------------------------------------
+alpha_pie_plot <- ggplot(alpha_indexes, aes(x = Formulation, y = Pielou)) +
+  geom_boxplot(aes(fill = Formulation), alpha = 0.5, position = position_dodge(width = 0.75), outlier.shape = NA) +
+  geom_point(position = position_dodge(width = 0.75), aes(shape = Individual, color = Individual), size = 2) +
+  labs(title = "Pielou index", x = NULL, y = NULL) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "vertical",
+    legend.title = element_blank(),
+    legend.spacing.y = unit(0, "pt"),
+    legend.margin = margin(t = 1, b = 1)
+  ) +
+  guides(
+    color = guide_legend(nrow = 1, bycol = TRUE, title = "Individual"),
+    shape = guide_legend(nrow = 1, bycol = TRUE, title = "Individual"),
+    fill = guide_legend(title = "Formulation")
+  ) +
+  scale_color_manual(values = c("Donor_05" = "#198384", "Donor_06" = "#ff3887", "Donor_10" = "#40007f", "Donor_11" = "#66ccfe")) +
+  scale_shape_manual(values = c("Donor_05" = 21, "Donor_06" = 22, "Donor_10" = 23, "Donor_11" = 24)) +
+  scale_fill_manual(values = c("Alginate" = "#66C2A5", "Capsule" = "#FC8D62", "Fresh" = "#8DA0CB")) +
+  stat_pvalue_manual(pie_values, label = "p.adj", tip.length = 0.02) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15)))
+
+
+### plot shannon -------------------------------------------------------------------------------------------------------------------------------------------
+alpha_shan_plot <- ggplot(alpha_indexes, aes(x = Formulation, y = Shannon)) +
+  geom_boxplot(aes(fill = Formulation), alpha = 0.5, position = position_dodge(width = 0.75), outlier.shape = NA) +
+  geom_point(position = position_dodge(width = 0.75), aes(shape = Individual, color = Individual), size = 2) +
+  labs(title = "Shannon index", x = NULL, y = NULL) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "vertical",
+    legend.title = element_blank(),
+    legend.spacing.y = unit(0, "pt"),
+    legend.margin = margin(t = 1, b = 1)
+  ) +
+  guides(
+    color = guide_legend(nrow = 1, bycol = TRUE, title = "Individual"),
+    shape = guide_legend(nrow = 1, bycol = TRUE, title = "Individual"),
+    fill = guide_legend(title = "Formulation")
+  ) +
+  scale_color_manual(values = c("Donor_05" = "#198384", "Donor_06" = "#ff3887", "Donor_10" = "#40007f", "Donor_11" = "#66ccfe")) +
+  scale_shape_manual(values = c("Donor_05" = 21, "Donor_06" = 22, "Donor_10" = 23, "Donor_11" = 24)) +
+  scale_fill_manual(values = c("Alginate" = "#66C2A5", "Capsule" = "#FC8D62", "Fresh" = "#8DA0CB")) +
+  stat_pvalue_manual(shan_values, label = "p.adj", tip.length = 0.02) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15)))
+```
+
+##4.2 Combine alpha plots
+```{r}
+# Combine plots
+alpha_plot <- ggarrange(alpha_chao_plot, alpha_pie_plot, alpha_shan_plot, nrow = 1, labels = c("A", "B", "C"), common.legend = TRUE, legend = "bottom", font.label = list(color = "red", face = "bold"))
+alpha_plot
+
+# add y-axis label
+alpha_plot <- annotate_figure(alpha_plot,
+  left = textGrob("Alpha diversity measure", rot = 90, vjust = 1),
+  top = text_grob("Alpha diversty", size = 15, color = "#0f4761", face = "bold")
+)
+
+alpha_plot
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/alpha_diversity.svg", height = 5, width = 8)
+```
+
+
+##3.3 Differentially present ASVs (Chao1)
+```{r}
+# come packages intervere with ps_venn so need to reload and only load the essentials
+### plot venn diagram of shared and unique taxa among donors room temp
+venn_unique_Species_splot <- MicEco::ps_venn(
+  ps = physeq_Species, group = "Individual*Formulation",
+  plot = TRUE,
+  main = list(cex = 1.1, labels = "\nShared and unique ASVs"), quantities = list(type = c("percent", "counts")),
+  fill = rev(mycolors), alpha = 0.5
+)
+
+# get the list of unique species in he alginate formulation for each individual
+venn_unique_Species <- MicEco::ps_venn(
+  ps = physeq_Species, group = "Individual*Formulation",
+  plot = FALSE
+)
+
+venn_unique_Species_df <- purrr:::map_df(names(venn_unique_Species), ~ tibble(value = venn_unique_Species[[.x]], group = .x))
+
+# subsetting elements where taxa are unique to the alginate formulation in each donor only
+venn_unique_Species_alginate <- MicEco::ps_venn(
+  ps = physeq_Species, group = "Individual*Formulation",
+  plot = FALSE
+)[c(1, 4, 7, 10)]
+
+# get the taxonomy
+Species_tax_asign <- data.frame(tax_table(physeq_Species)) %>%
+  distinct() %>%
+  select(Order, Family, Species)
+
+
+# unlist and merge
+venn_unique_Species_alginate_df <- purrr:::map_df(names(venn_unique_Species_alginate), ~ tibble(value = venn_unique_Species_alginate[[.x]], group = .x)) %>% # unlist into a dataframe
+  left_join(Species_tax_asign, by = c("value" = "Species")) %>%
+  magrittr::set_colnames(c("Species", "Individual", "Order", "Family")) %>%
+  mutate( # manually fix taxonomic classification with updated EZBC database
+    Species = if_else(Species == "DQ168656_s", "Marasmitruncus massiliensis", Species),
+    Species = if_else(Species == "PAC001160_s", "Pseudoruminococcus massiliensis", Species),
+    Species = if_else(Species == "JH590969_s", "Clostridium innocuum", Species),
+    Species = if_else(Species == "KQ960143_s", "Parvimonas parva ", Species),
+    Species = if_else(Species == "OCTT_s", "Solibaculum mannosilyticum", Species),
+    Species = if_else(Species == "FUHT_s", "Massiliimalia massiliensis", Species),
+    Species = if_else(Species == "PAC001255_s", "Pseudoflavonifractor gallinarum", Species)
+  )
+
+# breakdown by family:
+table(venn_unique_Species_alginate_df$Order)
+table(venn_unique_Species_alginate_df$Family)
+```
+
+##3.4 Intra-class correlation (ICC)
+```{r}
+# ICCbare can be used in unbalanced datasets
+# Measure ICC in Shannon
+icc_alpha_shannon <- subset(alpha_indexes, select = c("Shannon", "Individual", "Formulation"))
+
+ICCbare(Individual, Shannon, data = icc_alpha_shannon)
+```
+
+##3.5 Core Species 
+```{r}
+Species_tax_asign <- data.frame(tax_table(physeq_Species)) %>%
+  distinct()
+
+Species_count_core <- data.frame(otu_table(physeq_Species)) %>%
+  filter(across(everything(), ~ . > 1)) %>%
+  rownames_to_column("Species") %>%
+  left_join(Species_tax_asign, by = "Species") %>%
+  mutate( # manually fix taxonomic classification with updated EZBC database
+    Family = if_else(Species == "PAC001207_s", "Aristaeellaceae", Family),
+    Species = if_else(Species == "PAC001164_s", "Clostridium fessum", Species),
+    Species = if_else(Species == "GG697149_s", "Faecalibacterium duncaniae", Species),
+    Species = if_else(Species == "NMTZ_s", "Faecalibacterium prausnitzii", Species)
+  )
+
+nrow(Species_count_core) # numebr of core species
+
+table(Species_count_core$Family)
+
+core_Species_list <- as.vector(Species_count_core$Species)
+
+# write.csv(Species_count_core, "/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/Data/core_Species.csv")
+```
+
+
+#5. Beta diversity
+##5.1 Bray-Curtis 
+```{r}
+# We will check the bray-curtis distance at the species level
+# calculate distance matrix
+set.seed(12345)
+bray_dist <- phyloseq::distance(physeq_Species, method = "bray", binary = FALSE)
+
+# calculate ordination
+bray_ordination <- ordinate(physeq_Species, method = "NMDS", distance = bray_dist)
+bray_stress <- signif(bray_ordination$stress, digits = 2)
+
+#########################################################################################################################################################
+# statistical test for beta diversity
+
+# input files for statistical analysis
+bray_meta <- data.frame(sample_data(physeq_Species))
+bray_Species <- data.frame(otu_table(physeq_Species))
+
+#########################################################################################################################################################
+# calculate permanova
+set.seed(12345)
+bray_permanova <- adonis2(t(bray_Species) ~ Formulation,
+  data = bray_meta, permutations = 999, method = "bray", binary = FALSE, p.adjust.m = "BH"
+)
+
+bray_permanova_formulation <- signif(bray_permanova[["Pr(>F)"]][1], digits = 2)
+
+# calculate pairwise permanova
+pw_bray <- pairwise.adonis2(t(bray_Species) ~ Formulation, data = bray_meta, p.adjust.m = "BH", sim.method = "bray", binary = FALSE)
+
+pw_bray_cap_fresh <- signif(pw_bray[["Capsule_vs_Fresh"]][["Pr(>F)"]][1], digits = 2)
+pw_bray_alg_cap <- signif(pw_bray[["Capsule_vs_Alginate"]][["Pr(>F)"]][1], digits = 2)
+pw_bray_fresh_alg <- signif(pw_bray[["Fresh_vs_Alginate"]][["Pr(>F)"]][1], digits = 2)
+
+
+### test
+#########################################################################################################################################################
+# calculate beta-dispersion
+set.seed(12345)
+bray_dispersion_formulation <- anova(betadisper(bray_dist, bray_meta$Formulation))
+
+bray_dispersion_formulation <- signif(bray_dispersion_formulation[["Pr(>F)"]][1], digits = 2)
+
+
+#########################################################################################################################################################
+# add bray-curtis distance p values
+bray_values <- paste(
+  "\n",
+  "Stress:", bray_stress, " ", "\n",
+  "Dispersion:", bray_dispersion_formulation, " ", "\n",
+  "Pairwise PERMANOVA:", " ", "\n",
+  "Alginate-Capsule:", pw_bray_alg_cap, "  ", "\n",
+  "Alginate-Fresh:", pw_bray_fresh_alg, " ", "\n",
+  "Capsule-Fresh:", pw_bray_cap_fresh, " "
+)
+
+
+#########################################################################################################################################################
+### plot by timepoint
+beta_bray <- plot_ordination(physeq_Species, bray_ordination, type = "samples", color = "Formulation", shape = "Individual") +
+  stat_ellipse(aes(color = Formulation, group = Formulation), alpha = 0.8) +
+  theme_bw(base_size = 12) +
+  labs(title = "Bray-Curtis dissimilarity", x = NULL) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "vertical", # Adjust legend position and orientation
+    legend.spacing.y = unit(0, "lines"),
+    legend.margin = margin(0, 0, 0, 0)
+  ) + # reduce spacing between legends
+  scale_color_manual(values = c("Alginate" = "#66C2A5", "Capsule" = "#FC8D62", "Fresh" = "#8DA0CB")) +
+  scale_shape_manual(values = c("Donor_05" = 21, "Donor_06" = 22, "Donor_10" = 23, "Donor_11" = 24)) +
+  scale_fill_manual(values = c("Alginate" = "#66C2A5", "Capsule" = "#FC8D62", "Fresh" = "#8DA0CB")) +
+  guides(color = guide_legend(title = "Formulation", nrow = 1), shape = guide_legend(title = "Individual")) + # Properly nest nrow within guide_legend
+  geom_text(x = Inf, y = Inf, label = bray_values, hjust = 1, vjust = 1, color = "#5b5b5b", fontface = "plain", size = 3, family = "Arial")
+
+
+beta_bray
+```
+
+##5.2 Jaccard 
+```{r}
+# We will check the jaccard distance at the species level
+# calculate distance matrix
+set.seed(12345)
+jac_dist <- phyloseq::distance(physeq_Species, method = "jaccard", binary = TRUE)
+
+# calculate ordination
+jac_ordination <- ordinate(physeq_Species, method = "NMDS", distance = jac_dist)
+jac_stress <- signif(jac_ordination$stress, digits = 2)
+
+#########################################################################################################################################################
+# statistical test for beta diversity
+
+# input files for statistical analysis
+jac_meta <- data.frame(sample_data(physeq_Species))
+jac_Species <- data.frame(otu_table(physeq_Species))
+
+#########################################################################################################################################################
+# calculate permanova
+set.seed(12345)
+jac_permanova <- adonis2(t(jac_Species) ~ Formulation,
+  data = jac_meta, permutations = 999, method = "jac", binary = TRUE, p.adjust.m = "BH"
+)
+
+jac_permanova_formulation <- signif(jac_permanova[["Pr(>F)"]][1], digits = 2)
+
+# calculate pairwise permanova
+pw_jac <- pairwise.adonis2(t(jac_Species) ~ Formulation, data = jac_meta, p.adjust.m = "BH", sim.method = "jac", binary = TRUE)
+
+pw_jac_cap_fresh <- signif(pw_jac[["Capsule_vs_Fresh"]][["Pr(>F)"]][1], digits = 2)
+pw_jac_alg_cap <- signif(pw_jac[["Capsule_vs_Alginate"]][["Pr(>F)"]][1], digits = 2)
+pw_jac_fresh_alg <- signif(pw_jac[["Fresh_vs_Alginate"]][["Pr(>F)"]][1], digits = 2)
+
+
+### test
+#########################################################################################################################################################
+# calculate beta-dispersion
+set.seed(12345)
+jac_dispersion_formulation <- anova(betadisper(jac_dist, jac_meta$Formulation))
+
+jac_dispersion_formulation <- signif(jac_dispersion_formulation[["Pr(>F)"]][1], digits = 2)
+
+
+#########################################################################################################################################################
+# add jac-curtis distance p values
+jac_values <- paste(
+  "\n",
+  "Stress:", jac_stress, " ", "\n",
+  "Dispersion:", jac_dispersion_formulation, " ", "\n",
+  "Pairwise PERMANOVA:", " ", "\n",
+  "Alginate-Capsule:", pw_jac_alg_cap, " ", "\n",
+  "Alginate-Fresh:", pw_jac_fresh_alg, "  ", "\n",
+  "Capsule-Fresh:", pw_jac_cap_fresh, "   "
+)
+
+
+#########################################################################################################################################################
+### plot by timepoint
+beta_jac <- plot_ordination(physeq_Species, jac_ordination, type = "samples", color = "Formulation", shape = "Individual") +
+  stat_ellipse(aes(color = Formulation, group = Formulation), alpha = 0.8) +
+  theme_bw(base_size = 12) +
+  labs(title = "Jaccard index", x = NULL) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "vertical", # Adjust legend position and orientation
+    legend.spacing.y = unit(0, "lines"),
+    legend.margin = margin(0, 0, 0, 0)
+  ) + # reduce spacing between legends
+  scale_color_manual(values = c("Alginate" = "#66C2A5", "Capsule" = "#FC8D62", "Fresh" = "#8DA0CB")) +
+  scale_shape_manual(values = c("Donor_05" = 21, "Donor_06" = 22, "Donor_10" = 23, "Donor_11" = 24)) +
+  scale_fill_manual(values = c("Alginate" = "#66C2A5", "Capsule" = "#FC8D62", "Fresh" = "#8DA0CB")) +
+  guides(color = guide_legend(title = "Formulation", nrow = 1), shape = guide_legend(title = "Individual")) + # Properly nest nrow within guide_legend
+  geom_text(x = Inf, y = Inf, label = jac_values, hjust = 1, vjust = 1, color = "#5b5b5b", fontface = "plain", size = 3, family = "Arial")
+
+
+beta_jac
+```
+
+
+##5.3 Combine beta plots
+```{r}
+beta_plot <- ggarrange(beta_jac, beta_bray, nrow = 1, labels = c("D", "E"), legend = "none", font.label = list(color = "red", face = "bold"))
+beta_plot
+
+# add y-axis label
+beta_plot <- annotate_figure(beta_plot,
+  left = textGrob("NMDS", rot = 90, vjust = 1),
+  top = text_grob("Beta diversty", size = 15, color = "#0f4761", face = "bold")
+)
+
+beta_plot
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/beta_diversity.svg", width = 10, height = 5)
+```
+
+
+##5.4 Combine alpha + beta diversity plots 
+```{r}
+# Combine plots
+alpha_beta <- ggarrange(alpha_plot, NULL, beta_plot,
+  ncol = 1,
+  # widths = c(5, 0.25, 2.5),
+  heights = c(5, 0.25, 4),
+  legend = "bottom", common.legend = TRUE
+)
+alpha_beta
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/alpha_beta.svg", width = 9, height = 9)
+```
+
+
+##6.2 Identify taxa shared between Day_10 and Day_30
+```{r}
+# identify taxa intersection between groups
+intersection <- MicEco::ps_venn(ps = da_physeq_Species, group = "Timepoint", plot = FALSE)
+
+# intersection between asym and Day_30
+d10_d30_intersect <- as.data.frame(intersection$Day_10__Day_30) %>%
+  magrittr::set_colnames("Taxa") %>%
+  mutate(Type = "Day_10_Day_30")
+
+# merge
+tax_asign <- data.frame(tax_table(da_physeq_Species))
+d10_d30_intersect <- d10_d30_intersect %>%
+  inner_join(tax_asign, by = c("Taxa" = "Species"))
+
+# average number of unique species found across the 4 donors
+table(d10_d30_intersect$Order) # 51/64 belong to Clostridiales and 7/64 Bacteroidales
+table(d10_d30_intersect$Family) # 30/64 belong to Ruminococcaceae and 11/64 Lachnospiraceae
+```
+
+#7 Dendo-clustering
+##7.1 Bray-Curtis status Species
+```{r}
+# Bray-Curtis dendogram
+# create a subset of the metadata
+meta_sub <- metadata %>% dplyr::select(sample_label)
+
+dendo_Species_bray <- t(data.frame(otu_table(physeq_Species))) %>% as.matrix()
+
+dendo_bray_distance <- vegan::vegdist(dendo_Species_bray, method = "bray", binary = FALSE)
+
+# Create the dendrogram
+dendo_bray <- as.dendrogram(hclust(dendo_bray_distance, method = "ward.D2"))
+
+# Get the order of the dendrogram
+dendo_order_bray <- labels(dendo_bray)
+
+# Create the meta dataframe and assign colors
+dendo_meta_bray <- data.frame(phyloseq::sample_data(physeq_Species)) %>%
+  mutate(Formulation = factor(Formulation, levels = c("Alginate", "Capsule", "Fresh"))) %>%
+  mutate(Individual = factor(Individual, levels = c("Donor_05", "Donor_06", "Donor_10", "Donor_11"))) %>%
+  mutate(dendo_color_bray = case_when( # create color abd shapes for dendogram
+    Individual == "Donor_05" ~ "#198687",
+    Individual == "Donor_06" ~ "#f93d91",
+    Individual == "Donor_10" ~ "#9430b5",
+    Individual == "Donor_11" ~ "#56a2fd"
+  )) %>%
+  mutate(dendo_point_bray = case_when(
+    Formulation == "Alginate" ~ 4,
+    Formulation == "Capsule" ~ 8,
+    Formulation == "Fresh" ~ 11
+  ))
+
+
+# Reorder dendo_meta based on dendo_order
+dendo_meta_bray <- dendo_meta_bray %>% arrange(factor(sample_label, levels = dendo_order_bray))
+
+# Extract colors in the correct order
+dendo_color_bray <- dendo_meta_bray$dendo_color_bray
+
+# Assign colors to dendrogram leaves based on the reordered dendo_color2
+labels_colors(dendo_bray) <- dendo_color_bray
+
+# Assume 'Timepoint' contains values that determine the symbol on each leaf
+leaf_symbols_bray <- dendo_meta_bray$dendo_point_bray # Convert to character for leaf symbols
+```
+
+
+##7.2 Jaccard status Species
+```{r}
+# jaccard
+dendo_Species_jac <- t(data.frame(otu_table(physeq_Species))) %>%
+  as.matrix()
+
+dendo_jac_distance <- vegan::vegdist(dendo_Species_jac, method = "jaccard", binary = TRUE)
+
+# Create the dendrogram
+dendo_jac <- as.dendrogram(hclust(dendo_jac_distance, method = "ward.D2"))
+
+# Get the order of the dendrogram
+dendo_order_jac <- labels(dendo_jac)
+
+# Create the meta dataframe and assign colors
+dendo_meta_jac <- data.frame(phyloseq::sample_data(physeq_Species)) %>%
+  mutate(Formulation = factor(Formulation, levels = c("Alginate", "Capsule", "Fresh"))) %>%
+  mutate(Individual = factor(Individual, levels = c("Donor_05", "Donor_06", "Donor_10", "Donor_11"))) %>%
+  mutate(dendo_color_jac = case_when( # create color abd shapes for dendogram
+    Individual == "Donor_05" ~ "#198687",
+    Individual == "Donor_06" ~ "#f93d91",
+    Individual == "Donor_10" ~ "#9430b5",
+    Individual == "Donor_11" ~ "#56a2fd"
+  )) %>%
+  mutate(dendo_point_jac = case_when(
+    Formulation == "Alginate" ~ 4,
+    Formulation == "Capsule" ~ 8,
+    Formulation == "Fresh" ~ 11
+  ))
+
+
+# Reorder dendo_meta based on dendo_order
+dendo_meta_jac <- dendo_meta_jac %>% arrange(factor(sample_label, levels = dendo_order_jac))
+
+# Extract colors in the correct order
+dendo_color_jac <- dendo_meta_jac$dendo_color_jac
+
+# Assign colors to dendrogram leaves based on the reordered dendo_color2
+labels_colors(dendo_jac) <- dendo_color_jac
+
+# Assume 'Timepoint' contains values that determine the symbol on each leaf
+leaf_symbols_jac <- dendo_meta_jac$dendo_point_jac # Convert to character for leaf symbols
+```
+
+
+##7.3 Combine disease plots + legends 
+```{r}
+# combine plots
+# pdf("/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/dendo_bray_Species.pdf", width = 14, height = 10, pointsize = 14)
+# Set up the plotting area with enough margin for the legend
+par(mfrow = c(2, 1), mar = c(5, 4, 2, 5), oma = c(2, 1, 4, 1)) # Increase the right margin to 5
+
+# Plot A
+dendo_jac %>%
+  dendextend::set("branches_k_lty", k = 4) %>%
+  dendextend::set("leaves_pch", value = leaf_symbols_jac) %>%
+  dendextend::set("leaves_cex", 1.5) %>%
+  dendextend::set("leaves_col", dendo_color_jac) %>%
+  plot()
+title(
+  main = "Jaccard index",
+  adj = 0.5, cex.main = 1.25, font.main = 1, line = 0.5
+)
+mtext("A", side = 3, line = 0.5, adj = 0, cex = 1, col = "red", font = 2)
+
+# Add the overarching title above both plots
+mtext("Hierarchical clustering at the species level across formulations",
+  side = 3, outer = TRUE,
+  line = 2, cex = 1.5, font = 2, col = "#0f4761"
+)
+
+# Plot B
+dendo_bray %>%
+  dendextend::set("branches_k_lty", k = 4) %>%
+  dendextend::set("leaves_pch", value = leaf_symbols_bray) %>%
+  dendextend::set("leaves_cex", 1.5) %>%
+  dendextend::set("leaves_col", dendo_color_bray) %>%
+  plot()
+title(
+  main = "Bray-Curtis dissimilarity",
+  adj = 0.5, cex.main = 1.25, font.main = 1, line = 0.5
+)
+mtext("B", side = 3, line = 0.5, adj = 0, cex = 1, col = "red", font = 2)
+
+# Save the plot
+dev.off()
+
+
+#########################################################################################################################################################
+# create plot for legend
+
+# pdf("/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/dendo_bray_Species_legend.pdf", width = 3, height = 4.25, pointsize = 14)
+plot.new()
+
+legend("top", # Position legend at the top-right
+  title = "Individual",
+  legend = c("Donor_05", "Donor_06", "Donor_10", "Donor_11"),
+  col = c("#198687", "#f93d91", "#9430b5", "#56a2fd"), # Colors for Day_0 and Day_30
+  pch = 16, # Use a consistent shape for timepoints
+  bty = "n", # No border around the legend
+  pt.cex = 1, # Point size
+  cex = 0.9, # Text size
+  text.col = c("#198687", "#f93d91", "#9430b5", "#56a2fd"),
+  horiz = FALSE, # Vertical layout
+  inset = c(0.05, 0.05), # Adjust inset for positioning
+  y.intersp = 0.8, # Increase the space between the legend entries
+  xjust = 1,
+  yjust = 1,
+  xpd = TRUE
+)
+
+
+# Second, create a legend for the antibiotic status (shapes)
+legend("bottom", # Same position to overlay, but adjust down with inset
+  title = "Formulation",
+  legend = c("Alginate", "Capsule", "Fresh"),
+  col = "black", # Use black color for both
+  pch = c(4, 8, 11), # Shapes for no antibiotic and antibiotic
+  bty = "n", # No border around the legend
+  pt.cex = 1, # Point size
+  cex = 0.9, # Text size
+  text.col = "black",
+  horiz = FALSE, # Vertical layout
+  inset = c(0.05, -0.2), # Adjust further down (-0.2)
+  y.intersp = 0.8, # Increase the space between the legend entries
+  xjust = 1,
+  yjust = 1,
+  xpd = TRUE
+)
+
+dev.off()
+
+#########################################################################################################################################################
+# plot midpoints
+# Find the midpoint using the cut function
+midpoint_bray <- cut(dend_bray, h = "midpoint")
+
+midpoint_jac <- cut(dend_jac, h = "midpoint")
+```
+
+
+#8 Compositional barplot 
+##8.1 Genus level
+```{r}
+Genus_top <- get_top_taxa(physeq_Genus, n = 12, relative = TRUE, discard_other = FALSE)
+Genus12 <- names(sort(taxa_sums(Genus_top), TRUE)[1:12])
+Genus12 <- prune_taxa(Genus12, Genus_top)
+Genus12_rel <- microbiome::transform(Genus12, "compositional")
+
+# order samples
+sample_data(Genus12_rel)$Formulation <- factor(x = sample_data(Genus12_rel)$Formulation, levels = c("Alginate", "Capsule", "Fresh"), ordered = TRUE)
+sample_data(Genus12_rel)$Individual <- factor(x = sample_data(Genus12_rel)$Individual, levels = c("Donor_05", "Donor_06", "Donor_10", "Donor_11"), ordered = TRUE)
+
+# create color palette with more than 20 colors
+mycolors2 <- c(brewer.pal(name = "Paired", n = 12))
+
+# create color for each taxa
+Genus_top_taxa <- rownames(otu_table(Genus12_rel))
+
+# Create a named vector to map names to colors
+Genus_taxa_color <- setNames(mycolors2, Genus_top_taxa)
+Genus_taxa_color <- c(Genus_taxa_color, Other = "grey")
+
+
+#########################################################################################################################################################
+
+# plot compositional bar chart at the Genus level
+top_Genus_plot <- plot_bar(Genus12_rel, x = "sample_label", fill = "Genus") +
+  theme_bw(base_size = 12) +
+  facet_nested(. ~ Individual + Storage_short, scales = "free", space = "free_x") +
+  scale_fill_manual(values = Genus_taxa_color) +
+  labs(title = "Genus", y = NULL, x = NULL) +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    axis.text.y = element_text(vjust = 1, hjust = 1),
+    strip.text = element_text(size = 8),
+    legend.position = "right",
+    legend.key.size = unit(0.5, "line")
+  ) + # make the legend color boxes smaller
+  guides(fill = guide_legend(ncol = 1, byrow = TRUE))
+
+# plot area bar chart at the Genus level
+top_Genus_plot <- plot_area(Genus12_rel,
+  xvar = "Time_diff",
+  level = "Genus",
+  # facet.by = c("Individual", "Antibiotic"),
+  facet.by = "Donation",
+  abund.thres = 0,
+  prev.thres = 0,
+  fill.colors = Genus_taxa_color,
+  ncol = 8,
+  nrow = 5
+)
+
+top_Genus_plot
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/compositional_bar_genus.svg", width = 12, height = 8)
+
+### identify which taxa are the most abundant and at what count
+Genus_count <- data.frame(otu_table(Genus12_rel)) # the first most abundance taxa is "Other"
+avg_Genus_count <- as.data.frame(rowMeans(Genus_count))
+
+# write.csv(avg_Genus_count, "/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/Data/average_Genus_count.csv")
+```
+
+##6.8 Family  level
+```{r}
+# extract the top 10 taxas at the Family level
+Family_top <- get_top_taxa(physeq_Family, n = 10, relative = TRUE, discard_other = FALSE)
+Family10 <- names(sort(taxa_sums(Family_top), TRUE)[1:10])
+Family10 <- prune_taxa(Family10, Family_top)
+Family10_rel <- microbiome::transform(Family10, "compositional")
+
+# order samples
+sample_data(Family10)$Formulation <- factor(x = sample_data(Family10)$Formulation, levels = c("Alginate", "Capsule", "Fresh"), ordered = TRUE)
+sample_data(Family10)$Individual <- factor(x = sample_data(Family10)$Individual, levels = c("Donor_05", "Donor_06", "Donor_10", "Donor_11"), ordered = TRUE)
+
+# create color for each taxa
+Family_taxa_name <- rownames(otu_table(Family10_rel))
+
+# Create a named vector to map names to colors
+Family_taxa_color <- setNames(mycolors2, Family_taxa_name)
+Family_taxa_color <- c(Family_taxa_color, Other = "grey")
+
+#########################################################################################################################################################
+
+# plot compositional bar chart at the family level
+top_Family_plot <- plot_bar(Family10_rel, x = "sample_label", fill = "Family") +
+  theme_bw(base_size = 12) +
+  facet_nested(. ~ Individual + Storage_short, scales = "free", space = "free_x") +
+  scale_fill_manual(values = Family_taxa_color) +
+  labs(title = "Family", y = NULL, x = NULL) +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "right",
+    legend.key.size = unit(0.5, "line")
+  ) +
+  guides(fill = guide_legend(ncol = 1, byrow = TRUE))
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/compositional_bar_family.svg", height = 8, width = 12)
+
+
+### identify which taxa are the most abundant and at what count
+Family_count <- data.frame(otu_table(Family10_rel)) # the first most abundance taxa is "Other"
+avg_Family_count <- as.data.frame(rowMeans(Family_count))
+
+# write.csv(avg_Family_count, "/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/Data/average_Family_count.csv")
+```
+
+##8.3 Combine plots
+```{r}
+comp_bar <- ggarrange(top_Family_plot, top_Genus_plot, nrow = 2, labels = c("A", "B"), font.label = list(color = "red", face = "bold"), heights = c(0.5, 0.55), align = "v")
+comp_bar
+
+comp_bar <- annotate_figure(comp_bar,
+  left = textGrob("Relative abundance", rot = 90, vjust = 1),
+  top = text_grob("Microbiota profile across formulations", size = 15, color = "#0f4761", face = "bold"),
+  bottom = textGrob("Formulation")
+)
+
+comp_bar
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/compositional_bar_plot_formulation.svg", width = 17, height = 8)
+```
+
+#9 Differential abundance analysis
+#At the Family level
+##9.1 Maaslin2 - Family
+```{r}
+# make maaslin input
+maaslin_input_data_Family <- data.frame(otu_table(da_physeq_Family_dummy)) %>%
+  t() %>%
+  as.data.frame(check.rows = FALSE, check.names = FALSE, stringsAsFactors = FALSE)
+
+maaslin_input_metadata_Family <- data.frame(sample_data(da_physeq_Family_dummy))
+
+# Run Maaslin2
+maaslin_da_Family <- Maaslin2(
+  input_data = maaslin_input_data_Family,
+  input_metadata = maaslin_input_metadata_Family,
+  normalization = "CSS",
+  standardize = FALSE,
+  transform = "NONE",
+  analysis_method = "NEGBIN",
+  max_significance = 0.05,
+  output = "/home/localadmin/IMU/10_ETUDE_CLIN/MISTIC/Asterix_Obelix/ALGFMT/Analysis/Formulations_FINAL/Rerun_test_results/Maaslin2_Family_Formulation",
+  fixed_effects = c("Formulation"),
+  random_effects = c("Individual"),
+  correction = "BH",
+  reference = c("Formulation,Alginate"), # using the ALGFMT as reference
+  min_abundance = 0, # zero because i already filtered it and fed the filtered phyloseq object as input file
+  min_prevalence = 0,
+  heatmap = TRUE,
+  plot_scatter = TRUE,
+  cores = 10
+)
+
+# extract significant taxas with a q-value of less than 0.05
+maaslin_da_Family_df <- as.data.frame(maaslin_da_Family$results) %>% dplyr::filter(qval < 0.05)
+
+# dimensions of sig DA species
+dim(maaslin_da_Family_df) # 30   10
+```
+
+
+
+##9.2 ANCOMBC - Family 
+```{r}
+sample_data(da_physeq_Family)$Formulation <- factor(sample_data(da_physeq_Family)$Formulation, levels = c("Alginate", "Capsule", "Fresh"))
+
+# Run AncomBC function
+ancombc_da_Family <- ancombc2(
+  data = da_physeq_Family, fix_formula = "Formulation", tax_level = "Family",
+  rand_formula = "(1 | Individual)",
+  p_adj_method = "BH", prv_cut = 0, lib_cut = 0, pairwise = TRUE, # prev filtering has been done above already
+  group = "Formulation", struc_zero = FALSE, neg_lb = FALSE, # takes the first factor alphabetically as reference, in this case, ALGFMT
+  alpha = 0.05, verbose = TRUE, global = FALSE
+)
+
+# subset taxa which have a sig pvalue
+ancombc_da_Family_df <- as.data.frame(ancombc_da_Family$res) %>%
+  dplyr::select(taxon, lfc_FormulationCapsule, lfc_FormulationFresh, q_FormulationCapsule, q_FormulationFresh) %>%
+  pivot_longer(cols = q_FormulationCapsule:q_FormulationFresh, names_to = "Formulation", values_to = "q_value") %>%
+  filter(q_value <= 0.05) %>%
+  pivot_longer(starts_with("lfc"), names_to = "lfc", values_to = "ancombc_lfc_value") %>%
+  mutate(Formulation = case_when(
+    grepl("Fresh", Formulation) ~ "Fresh",
+    grepl("Capsule", Formulation) ~ "Capsule"
+  )) %>%
+  mutate(lfc = case_when(
+    grepl("Fresh", lfc) ~ "Fresh",
+    grepl("Capsule", lfc) ~ "Capsule"
+  )) %>%
+  filter(Formulation == lfc)
+
+dim(ancombc_da_Family_df) # dim(19  5)
+
+
+# save as a csv so we can load and plot
+# write.csv(ancombc_da_Family_df, "/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/Data/ancomb_sig_lfc_Family.csv")
+```
+
+
+##9.3 DA Family intersection
+```{r}
+#########################################################################################################################################################
+# create input for lfc plot
+
+Family_tax_asign <- data.frame(tax_table(da_physeq_Family)) %>%
+  dplyr::select(Family)
+
+# input to join DA dataframes
+maaslin_da_Family_df_formulation <- maaslin_da_Family_df %>%
+  mutate(Tool = "MaAslin2") %>%
+  mutate(l2fc = log2(exp(coef))) %>%
+  dplyr::rename(Taxa = feature, Formulation = value) %>%
+  dplyr::select(Taxa, l2fc, Tool, Formulation)
+
+ancombc_da_Family_df_formulation <- ancombc_da_Family_df %>%
+  mutate(Tool = "ANCOM-BC2") %>%
+  mutate(l2fc = ancombc_lfc_value / log(2)) %>% # convert lfc to log2foldchange
+  dplyr::rename(Taxa = taxon, Formulation = Formulation) %>%
+  dplyr::select(Taxa, l2fc, Tool, Formulation)
+
+
+# merge
+all_da_Family <- bind_rows(maaslin_da_Family_df_formulation, ancombc_da_Family_df_formulation) %>%
+  pivot_wider(names_from = Tool, values_from = l2fc) %>%
+  mutate(
+    Consensus = rowSums(!is.na(across(c(MaAslin2, `ANCOM-BC2`)))) # Count number of tools that agree a feature is DA
+  ) %>%
+  filter(Consensus %in% c(2)) %>% # only keep features whre more than 2 tools agree
+  mutate(Taxa = factor(Taxa)) %>%
+  mutate(Average_lfc = rowMeans(dplyr::select(., c(MaAslin2, `ANCOM-BC2`)), na.rm = TRUE)) %>%
+  mutate(Average_lfc = signif(Average_lfc, 2)) %>% # round
+  left_join(Family_tax_asign, by = c("Taxa" = "Family")) %>%
+  mutate(Lineage = Taxa) %>%
+  mutate(Family = Taxa) %>%
+  mutate(Rank = "Family")
+
+dim(all_da_Family) # 17   9
+```
+
+
+
+#At the Genus level
+##9.4  Maaslin2 - Genus
+```{r}
+# make maaslin input
+maaslin_input_data_Genus <- data.frame(otu_table(da_physeq_Genus_dummy)) %>%
+  t() %>%
+  as.data.frame(check.rows = FALSE, check.names = FALSE, stringsAsFactors = FALSE)
+
+maaslin_input_metadata_Genus <- data.frame(sample_data(da_physeq_Genus_dummy))
+
+# Run Maaslin2
+maaslin_da_Genus <- Maaslin2(
+  input_data = maaslin_input_data_Genus,
+  input_metadata = maaslin_input_metadata_Genus,
+  normalization = "CSS",
+  standardize = FALSE,
+  transform = "NONE",
+  analysis_method = "NEGBIN",
+  max_significance = 0.05,
+  output = "/home/localadmin/IMU/10_ETUDE_CLIN/MISTIC/Asterix_Obelix/ALGFMT/Analysis/Formulations_FINAL/Rerun_test_results/Maaslin2_Genus_Formulation",
+  fixed_effects = c("Formulation"),
+  random_effects = c("Individual"),
+  correction = "BH",
+  reference = c("Formulation,Alginate"), # using the ALGFMT as reference
+  min_abundance = 0, # zero because i already filtered it and fed the filtered phyloseq object as input file
+  min_prevalence = 0,
+  heatmap = TRUE,
+  plot_scatter = TRUE,
+  cores = 10
+)
+
+# extract significant taxas with a q-value of less than 0.05
+maaslin_da_Genus_df <- as.data.frame(maaslin_da_Genus$results) %>% dplyr::filter(qval < 0.05)
+
+# dimensions of sig DA species
+dim(maaslin_da_Genus_df) # 105   10
+```
+
+
+##9.5 ANCOMBC - Genus 
+```{r}
+sample_data(da_physeq_Genus)$Formulation <- factor(sample_data(da_physeq_Genus)$Formulation, levels = c("Alginate", "Capsule", "Fresh"))
+
+# Run AncomBC function
+ancombc_da_Genus <- ancombc2(
+  data = da_physeq_Genus, fix_formula = "Formulation", tax_level = "Genus",
+  rand_formula = "(1 | Individual)",
+  p_adj_method = "BH", prv_cut = 0, lib_cut = 0, pairwise = TRUE, # prev filtering has been done above already
+  group = "Formulation", struc_zero = FALSE, neg_lb = FALSE, # takes the first factor alphabetically as reference, in this case, ALGFMT
+  alpha = 0.05, verbose = TRUE, global = FALSE
+)
+
+# subset taxa which have a sig pvalue
+ancombc_da_Genus_df <- as.data.frame(ancombc_da_Genus$res) %>%
+  dplyr::select(taxon, lfc_FormulationCapsule, lfc_FormulationFresh, q_FormulationCapsule, q_FormulationFresh) %>%
+  pivot_longer(cols = q_FormulationCapsule:q_FormulationFresh, names_to = "Formulation", values_to = "q_value") %>%
+  filter(q_value <= 0.05) %>%
+  pivot_longer(starts_with("lfc"), names_to = "lfc", values_to = "ancombc_lfc_value") %>%
+  mutate(Formulation = case_when(
+    grepl("Fresh", Formulation) ~ "Fresh",
+    grepl("Capsule", Formulation) ~ "Capsule"
+  )) %>%
+  mutate(lfc = case_when(
+    grepl("Fresh", lfc) ~ "Fresh",
+    grepl("Capsule", lfc) ~ "Capsule"
+  )) %>%
+  filter(Formulation == lfc)
+
+dim(ancombc_da_Genus_df) # dim(56  5)
+
+
+# save as a csv so we can load and plot
+# write.csv(ancombc_da_Genus_df, "/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/Data/ancomb_sig_lfc_Genus.csv")
+```
+
+
+##9.6 DA Genus intersection
+```{r}
+#########################################################################################################################################################
+# create input for lfc plot
+
+Genus_tax_asign <- data.frame(tax_table(da_physeq_Genus)) %>%
+  dplyr::select(Family, Genus)
+
+# input to join DA dataframes
+maaslin_da_Genus_df_formulation <- maaslin_da_Genus_df %>%
+  mutate(Tool = "MaAslin2") %>%
+  mutate(l2fc = log2(exp(coef))) %>%
+  dplyr::rename(Taxa = feature, Formulation = value) %>%
+  dplyr::select(Taxa, l2fc, Tool, Formulation)
+
+ancombc_da_Genus_df_formulation <- ancombc_da_Genus_df %>%
+  mutate(Tool = "ANCOM-BC2") %>%
+  mutate(l2fc = ancombc_lfc_value / log(2)) %>% # convert lfc to log2foldchange
+  dplyr::rename(Taxa = taxon, Formulation = Formulation) %>%
+  dplyr::select(Taxa, l2fc, Tool, Formulation)
+
+
+# merge
+all_da_Genus <- bind_rows(maaslin_da_Genus_df_formulation, ancombc_da_Genus_df_formulation) %>%
+  pivot_wider(names_from = Tool, values_from = l2fc) %>%
+  mutate(
+    Consensus = rowSums(!is.na(across(c(MaAslin2, `ANCOM-BC2`)))) # Count number of tools that agree a feature is DA
+  ) %>%
+  filter(Consensus %in% c(2)) %>% # only keep features whre more than 2 tools agree
+  mutate(Taxa = factor(Taxa)) %>%
+  mutate(Average_lfc = rowMeans(dplyr::select(., c(MaAslin2, `ANCOM-BC2`)), na.rm = TRUE)) %>%
+  mutate(Average_lfc = signif(Average_lfc, 2)) %>% # round
+  left_join(Genus_tax_asign, by = c("Taxa" = "Genus")) %>%
+  mutate(Lineage = str_c(Family, ", ", Taxa)) %>%
+  mutate(Rank = "Genus")
+
+dim(all_da_Genus) # 52   9
+```
+
+
+#At the Species level
+##9.7 Maaslin2 - Species
+```{r}
+# make maaslin input
+maaslin_input_data_Species <- data.frame(otu_table(da_physeq_Species_dummy)) %>%
+  t() %>%
+  as.data.frame(check.rows = FALSE, check.names = FALSE, stringsAsFactors = FALSE)
+
+maaslin_input_metadata_Species <- data.frame(sample_data(da_physeq_Species_dummy))
+
+# Run Maaslin2
+maaslin_da_Species <- Maaslin2(
+  input_data = maaslin_input_data_Species,
+  input_metadata = maaslin_input_metadata_Species,
+  normalization = "CSS",
+  standardize = FALSE,
+  transform = "NONE",
+  analysis_method = "NEGBIN",
+  max_significance = 0.05,
+  output = "/home/localadmin/IMU/10_ETUDE_CLIN/MISTIC/Asterix_Obelix/ALGFMT/Analysis/Formulations_FINAL/Rerun_test_results/Maaslin2_Species_Formulation",
+  fixed_effects = c("Formulation"),
+  random_effects = c("Individual"),
+  correction = "BH",
+  reference = c("Formulation,Alginate"), # using the ALGFMT as reference
+  min_abundance = 0, # zero because i already filtered it and fed the filtered phyloseq object as input file
+  min_prevalence = 0,
+  heatmap = TRUE,
+  plot_scatter = TRUE,
+  cores = 10
+)
+
+# extract significant taxas with a q-value of less than 0.05
+maaslin_da_Species_df <- as.data.frame(maaslin_da_Species$results) %>% dplyr::filter(qval < 0.05)
+
+# dimensions of sig DA species
+dim(maaslin_da_Species_df) # 276   10
+```
+
+
+##9.8 ANCOMBC - Species 
+```{r}
+sample_data(da_physeq_Species)$Formulation <- factor(sample_data(da_physeq_Species)$Formulation, levels = c("Alginate", "Capsule", "Fresh"))
+
+# Run AncomBC function
+ancombc_da_Species <- ancombc2(
+  data = da_physeq_Species, fix_formula = "Formulation", tax_level = "Species",
+  rand_formula = "(1 | Individual)",
+  p_adj_method = "BH", prv_cut = 0, lib_cut = 0, pairwise = TRUE, # prev filtering has been done above already
+  group = "Formulation", struc_zero = FALSE, neg_lb = FALSE, # takes the first factor alphabetically as reference, in this case, ALGFMT
+  alpha = 0.05, verbose = TRUE, global = FALSE
+)
+
+# subset taxa which have a sig pvalue
+ancombc_da_Species_df <- as.data.frame(ancombc_da_Species$res) %>%
+  dplyr::select(taxon, lfc_FormulationCapsule, lfc_FormulationFresh, q_FormulationCapsule, q_FormulationFresh) %>%
+  pivot_longer(cols = q_FormulationCapsule:q_FormulationFresh, names_to = "Formulation", values_to = "q_value") %>%
+  filter(q_value <= 0.05) %>%
+  pivot_longer(starts_with("lfc"), names_to = "lfc", values_to = "ancombc_lfc_value") %>%
+  mutate(Formulation = case_when(
+    grepl("Fresh", Formulation) ~ "Fresh",
+    grepl("Capsule", Formulation) ~ "Capsule"
+  )) %>%
+  mutate(lfc = case_when(
+    grepl("Fresh", lfc) ~ "Fresh",
+    grepl("Capsule", lfc) ~ "Capsule"
+  )) %>%
+  filter(Formulation == lfc)
+
+dim(ancombc_da_Species_df) # dim(103  5)
+
+# save as a csv so we can load and plot
+# write.csv(ancombc_da_Species_df, "/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/Data/ancomb_sig_lfc_Species.csv")
+```
+
+
+##9.9 DA Species intersection
+```{r}
+#########################################################################################################################################################
+# create input for lfc plot
+
+Species_tax_asign <- data.frame(tax_table(da_physeq_Species)) %>%
+  dplyr::select(Family, Species)
+
+# input to join DA dataframes
+maaslin_da_Species_df_formulation <- maaslin_da_Species_df %>%
+  mutate(Tool = "MaAslin2") %>%
+  mutate(l2fc = log2(exp(coef))) %>%
+  dplyr::rename(Taxa = feature, Formulation = value) %>%
+  dplyr::select(Taxa, l2fc, Tool, Formulation)
+
+ancombc_da_Species_df_formulation <- ancombc_da_Species_df %>%
+  mutate(Tool = "ANCOM-BC2") %>%
+  mutate(l2fc = ancombc_lfc_value / log(2)) %>% # convert lfc to log2foldchange
+  dplyr::rename(Taxa = taxon, Formulation = Formulation) %>%
+  dplyr::select(Taxa, l2fc, Tool, Formulation)
+
+
+# merge
+all_da_Species <- bind_rows(maaslin_da_Species_df_formulation, ancombc_da_Species_df_formulation) %>%
+  pivot_wider(names_from = Tool, values_from = l2fc) %>%
+  mutate(
+    Consensus = rowSums(!is.na(across(c(MaAslin2, `ANCOM-BC2`)))) # Count number of tools that agree a feature is DA
+  ) %>%
+  filter(Consensus %in% c(2)) %>% # only keep features whre more than 2 tools agree
+  mutate(Taxa = factor(Taxa)) %>%
+  mutate(Average_lfc = rowMeans(dplyr::select(., c(MaAslin2, `ANCOM-BC2`)), na.rm = TRUE)) %>%
+  mutate(Average_lfc = signif(Average_lfc, 2)) %>% # round
+  left_join(Species_tax_asign, by = c("Taxa" = "Species")) %>%
+  mutate(Lineage = str_c(Family, ", ", Taxa)) %>%
+  mutate(Rank = "Species")
+
+dim(all_da_Species) # 59   9
+```
+
+#Combine
+##9.9 Combine DA plots
+```{r}
+all_da_ranks <- bind_rows(all_da_Family, all_da_Genus, all_da_Species) %>%
+  mutate(MaAslin2 = signif(MaAslin2, 2)) # round
+
+table(all_da_ranks$Rank)
+unique(all_da_ranks$Family)
+
+# [1] "Lactobacillaceae"      "Prevotellaceae"        "Christensenellaceae"   "Lachnospiraceae"       "Mogibacterium_f"       "Peptostreptococcaceae" "Erysipelotrichaceae"   "Bifidobacteriaceae"
+# [9] "Rikenellaceae"         "Ruminococcaceae"
+
+Family_taxa_color
+#  Bacteroidaceae      Muribaculaceae  Porphyromonadaceae      Prevotellaceae Christensenellaceae     Lachnospiraceae     Ruminococcaceae  Acidaminococcaceae     Veillonellaceae
+#       "#A6CEE3"           "#1F78B4"           "#B2DF8A"           "#33A02C"           "#FB9A99"           "#E31A1C"           "#FDBF6F"           "#FF7F00"           "#CAB2D6"
+# Akkermansiaceae                <NA>                <NA>               Other
+#       "#6A3D9A"           "#FFFF99"           "#B15928"              "grey"
+
+#########################################################################################################################################################
+# plot
+
+all_da_ranks_plot <- ggplot(data = all_da_ranks, aes(x = reorder(Taxa, -MaAslin2), y = Average_lfc, fill = Family)) +
+  scale_x_discrete(labels = function(x) {
+    stringr::str_wrap(x, width = 30)
+  }) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Differentially abundant taxa over time", y = "log2 fold change\n\n\n", x = "Taxa") +
+  facet_grid(~Rank, scales = "free", space = "free") +
+  theme_bw(base_size = 12) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+  geom_text(aes(label = MaAslin2),
+    position = position_dodge(width = 0.9),
+    size = 3,
+    vjust = 0.5, #
+    hjust = 0.5
+  ) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "right",
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    plot.margin = margin(10, 10, 10, 30),
+    legend.spacing.x = unit(5, "cm")
+  )
+
+
+all_da_ranks_plot
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/da_all_ranks.svg", height = 5.5,width = 13)
+```
+
+
+##9.9 Top 5 DA each taxa
+```{r}
+all_da_ranks_top_5 <- bind_rows(all_da_Family, all_da_Genus, all_da_Species) %>%
+  mutate(MaAslin2 = signif(MaAslin2, 2)) %>% # round
+  group_by(Rank) %>%
+  mutate(abs_value = abs(MaAslin2)) %>%
+  dplyr::arrange(desc(abs_value)) %>%
+  slice_head(n = 5) %>% # select the 10 most largets lfc in each taxonomic rank
+  mutate( # manually fix taxonomic classification with updated EZBC database
+    Lineage = if_else(Taxa == "PAC001360_g", "Borkfalkiales, PAC001360_g", Lineage),
+    Family = if_else(Taxa == "PAC001360_g", "Borkfalkiales", Family),
+    Lineage = if_else(Taxa == "PAC001213_s", "Victivallaceae, Victivallis lenta", Lineage),
+    Family = if_else(Taxa == "PAC001213_s", "Victivallaceae", Family),
+    Lineage = if_else(Taxa == "PAC001435_s", "Borkfalkiales, PAC001435_s", Lineage),
+    Family = if_else(Taxa == "PAC001435_s", "Borkfalkiales", Family)
+  )
+
+unique(all_da_ranks_top_5$Family)
+
+#  "Victivallaceae"  "Enterococcaceae" "Barnesiellaceae" "Rikenellaceae"   "Borkfalkiales"   "Lachnospiraceae"
+
+Family_taxa_color
+# Bacteroidaceae      Muribaculaceae  Porphyromonadaceae      Prevotellaceae Christensenellaceae     Lachnospiraceae     Ruminococcaceae  Acidaminococcaceae     Veillonellaceae
+#       "#A6CEE3"           "#1F78B4"           "#B2DF8A"           "#33A02C"           "#FB9A99"           "#E31A1C"           "#FDBF6F"           "#FF7F00"           "#CAB2D6"
+# Akkermansiaceae                <NA>                <NA>               Other
+#       "#6A3D9A"           "#FFFF99"           "#B15928"              "grey"
+
+#########################################################################################################################################################
+# plot
+
+all_da_ranks_top_5_plot <- ggplot(data = all_da_ranks_top_5, aes(x = reorder(Taxa, -MaAslin2), y = MaAslin2, fill = Family, pattern = Formulation)) +
+  geom_bar_pattern(
+    stat = "identity",
+    position = position_dodge(preserve = "single"),
+    color = "black",
+    pattern_fill = "white",
+    pattern_angle = 45,
+    pattern_density = 0.3
+  ) +
+  facet_grid(~Rank, scales = "free", space = "free_x") +
+  scale_fill_manual(values = c("Victivallaceae" = "#f4e9e2", "Enterococcaceae" = "#0c457d", "Rikenellaceae" = "#ff9c00", "Lachnospiraceae" = "#E31A1C", "Barnesiellaceae" = "#6fa267", "Borkfalkiales" = "#ff5fb6")) +
+  scale_pattern_manual(values = c(Capsule = "stripe", Fresh = "none")) +
+  labs(
+    x = "Taxa", y = "MaAsLin2 log2 fold change", pattern = "Formulation",
+    title = "Top 5 most differentially abundant taxa across formulations"
+  ) +
+  guides(
+    fill = guide_legend(override.aes = list(pattern = "none")),
+    pattern = guide_legend(override.aes = list(fill = "white"))
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)
+  )
+
+all_da_ranks_top_5_plot
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/da_all_ranks_top_5.svg", height = 4.5,width = 8)
+```
+
+##9.10 Combine DA + alpha + beta plots
+```{r}
+# add label for lfc plot
+all_da_ranks_plot_top_5 <- ggarrange(all_da_ranks_top_5_plot, labels = c("F"), legend = "right", font.label = list(color = "red", face = "bold"))
+
+# add y-axis label
+all_da_ranks_plot_top_5 <- annotate_figure(all_da_ranks_plot_top_5,
+  top = text_grob("Differential abundance analysis", size = 15, color = "#0f4761", face = "bold")
+)
+
+all_da_ranks_plot_top_5
+
+# Combine plots
+alpha_beta_lfc <- alpha_beta / all_da_ranks_plot_top_5 +
+  plot_layout(heights = c(5.5, 3))
+alpha_beta_lfc
+
+# ggsave("/home/localadmin/cchen/ALGFMT/Analysis/Formulations_FINAL/Visualisation/alpha_beta_lfc_top_5.svg", width = 9, height = 13.5)
+```
+
+#END

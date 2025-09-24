@@ -1,0 +1,185 @@
+---
+title: "ALGFMT_Viability_Assessment"
+author: "Carmen"
+date: '2025-09-18'
+output: html_document
+
+#Load packages
+---
+```{r}
+library(xlsx)
+library(dplyr)
+library(stringr)
+```
+
+#Formulation
+#1. Plate counting
+```{r}
+# Compare the viability according to flow cytometry of the capsules to the alginate pair
+plate_count <- read.csv("/home/localadmin/Downloads/Stabilityplate-counting.csv") %>%
+  select(-Freecells) %>% # remove unwanted column
+  pivot_longer(cols = -Time, names_to = "Donation", values_to = "plate_cfu", values_drop_na = TRUE) %>%
+  mutate(Formulation = case_when(
+    str_detect(Donation, "Freecells") ~ "Stool",
+    str_detect(Donation, "Donor") ~ "Alginate",
+    str_detect(Donation, "DRCaps") ~ "Capsule",
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(Donation = case_when(
+    str_detect(Donation, "DRCaps1") ~ "Donor3.11",
+    str_detect(Donation, "DRCaps2") ~ "Donor3.13",
+    str_detect(Donation, "DRCaps3") ~ "Donor4.01",
+    TRUE ~ Donation
+  )) %>%
+  mutate(Individual = case_when(
+    str_detect(Donation, "Donor1") ~ "Donor1",
+    str_detect(Donation, "Donor2") ~ "Donor2",
+    str_detect(Donation, "Donor3") ~ "Donor3",
+    str_detect(Donation, "Donor4") ~ "Donor4",
+    TRUE ~ Donation
+  )) %>%
+  filter(Individual %in% c("Donor3", "Donor4")) %>%
+  mutate(
+    Donation = factor(Donation),
+    Formulation = factor(Formulation),
+    Individual = factor(Individual)
+  ) %>%
+  group_by(Individual, Donation, Formulation, Time) %>%
+  dplyr::summarise(Plate_cfu_mean = mean(plate_cfu, na.rm = TRUE), .groups = "drop")
+
+
+plate_formulation <- nlme::lme(
+  Plate_cfu_mean ~ Formulation,
+  random = ~ 1 | Individual / Donation,
+  data = plate_count
+)
+
+anova(plate_formulation)
+#             numDF denDF  F-value p-value
+# (Intercept)     1    38 5.630071  0.0228
+# Formulation     1    38 1.058279  0.3101
+```
+
+#2. FCM
+```{r}
+# Compare the viability according to flow cytometry of the capsules to the alginate pair
+fcm_count <- read.csv("/home/localadmin/Downloads/FCMcount.csv") %>%
+  select(-Freecells) %>% # remove unwanted column
+  pivot_longer(cols = -Time, names_to = "Donation", values_to = "fcm_cfu", values_drop_na = TRUE) %>%
+  mutate(Formulation = case_when(
+    str_detect(Donation, "Freecells") ~ "Stool",
+    str_detect(Donation, "Donor") ~ "Alginate",
+    str_detect(Donation, "DRCaps") ~ "Capsule",
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(Donation = case_when(
+    str_detect(Donation, "DRCaps_1") ~ "Donor3.11",
+    str_detect(Donation, "DRCaps_2") ~ "Donor3.13",
+    str_detect(Donation, "DRCaps_3") ~ "Donor4.01",
+    TRUE ~ Donation
+  )) %>%
+  mutate(Individual = case_when(
+    str_detect(Donation, "Donor1") ~ "Donor1",
+    str_detect(Donation, "Donor2") ~ "Donor2",
+    str_detect(Donation, "Donor3") ~ "Donor3",
+    str_detect(Donation, "Donor4") ~ "Donor4",
+    TRUE ~ Donation
+  )) %>%
+  filter(Individual %in% c("Donor3", "Donor4")) %>%
+  mutate(
+    Donation = factor(Donation),
+    Formulation = factor(Formulation),
+    Individual = factor(Individual)
+  ) %>%
+  group_by(Individual, Donation, Formulation, Time) %>%
+  dplyr::summarise(Fcm_cfu_mean = mean(fcm_cfu, na.rm = TRUE), .groups = "drop")
+
+
+fcm_formulation <- nlme::lme(
+  Fcm_cfu_mean ~ Formulation,
+  random = ~ 1 | Individual / Donation,
+  data = fcm_count
+)
+
+anova(fcm_formulation)
+#             numDF denDF  F-value p-value
+# (Intercept)     1    38 31950.02  <.0001
+# Formulation     1    38    42.41  <.0001
+```
+
+#Longitudinal - Paired data only 
+#1. Plate counting
+```{r}
+# Compare the viability according to plate counting of the capsules to the alginate pair
+plate_count_pair <- read.csv("/home/localadmin/Downloads/Stabilityplate-counting.csv") %>%
+  select(Time, Donor3.11, Donor3.13, Donor4.01, DRCaps1, DRCaps2, DRCaps3) %>% # select only the samples where I have the capsules and alginate
+  pivot_longer(cols = -Time, names_to = "Donation", values_to = "plate_cfu", values_drop_na = TRUE) %>%
+  mutate(Formulation = case_when(
+    str_detect(Donation, "Donor") ~ "Alginate",
+    str_detect(Donation, "DRCaps") ~ "Capsule",
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(Donation = case_when(
+    str_detect(Donation, "DRCaps1") ~ "Donor3.11",
+    str_detect(Donation, "DRCaps2") ~ "Donor3.13",
+    str_detect(Donation, "DRCaps3") ~ "Donor4.01",
+    TRUE ~ Donation
+  )) %>%
+  mutate(Individual = case_when(
+    str_detect(Donation, "Donor3") ~ "Donor3",
+    str_detect(Donation, "Donor4") ~ "Donor4"
+  )) %>%
+  mutate(
+    Donation = factor(Donation),
+    Formulation = factor(Formulation),
+    Individual = factor(Individual)
+  ) %>%
+  group_by(Time, Formulation, Donation, Individual) %>%
+  dplyr::summarise(Mean = mean(plate_cfu, na.rm = TRUE), .groups = "drop") # take mean since technical replicate
+
+plate_type_time_pair <- nlme::lme(Mean ~ Time * Formulation, random = ~ 1 | Individual / Donation, data = plate_count_pair)
+anova(plate_type_time_pair)
+#                  numDF denDF  F-value p-value
+# (Intercept)          1    18 3.467135  0.0790
+# Time                 1    18 0.654829  0.4290
+# Formulation          1    18 0.906695  0.3536
+# Time:Formulation     1    18 1.356190  0.2594
+```
+
+#2. FCM
+```{r}
+# Compare the viability according to flow cytometry of the capsules to the alginate pair
+fcm_count_pair <- read.csv("/home/localadmin/Downloads/FCMcount.csv") %>%
+  select(Time, Donor3.11, Donor3.13, Donor4.01, DRCaps_1, DRCaps_2, DRCaps_3) %>% # select only the samples where I have the capsules and alginate
+  pivot_longer(cols = -Time, names_to = "Donation", values_to = "fcm_cfu", values_drop_na = TRUE) %>%
+  mutate(Formulation = case_when(
+    str_detect(Donation, "Donor") ~ "Alginate",
+    str_detect(Donation, "DRCaps") ~ "Capsule",
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(Donation = case_when(
+    str_detect(Donation, "DRCaps_1") ~ "Donor3.11",
+    str_detect(Donation, "DRCaps_2") ~ "Donor3.13",
+    str_detect(Donation, "DRCaps_3") ~ "Donor4.01",
+    TRUE ~ Donation
+  )) %>%
+  mutate(Individual = case_when(
+    str_detect(Donation, "Donor3") ~ "Donor3",
+    str_detect(Donation, "Donor4") ~ "Donor4"
+  )) %>%
+  mutate(
+    Donation = factor(Donation),
+    Formulation = factor(Formulation),
+    Individual = factor(Individual)
+  ) %>%
+  group_by(Time, Formulation, Donation, Individual) %>%
+  dplyr::summarise(Mean = mean(fcm_cfu, na.rm = TRUE), .groups = "drop") # take mean since technical replicate
+
+fcm_type_time_pair <- nlme::lme(Mean ~ Time * Formulation, random = ~ 1 | Individual / Donation, data = fcm_count_pair)
+anova(fcm_type_time_pair)
+#                  numDF denDF   F-value p-value
+# (Intercept)          1    18 12770.188  <.0001
+# Time                 1    18     0.061  0.8080
+# Formulation          1    18    14.183  0.0014
+# Time:Formulation     1    18     0.397  0.5365
+```
